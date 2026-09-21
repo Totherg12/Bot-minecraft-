@@ -1,3 +1,6 @@
+process.env.DEBUG =
+'minecraft-protocol';
+
 const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuilder, Events } = require('discord.js');
 const bedrock = require('bedrock-protocol');
 const express = require('express');
