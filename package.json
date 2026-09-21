@@ -1,12 +1,13 @@
 {
   "name": "minecraft-discord-bot",
   "version": "1.0.0",
-  "description": "Bot do Discord para monitorar servidor Bedrock",
+  "description": "Bot do Discord para monitorar nicks no Bedrock",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
+    "bedrock-protocol": "^1.30.0",
     "discord.js": "^14.14.1",
     "express": "^4.19.2"
   }
