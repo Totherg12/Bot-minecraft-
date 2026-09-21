@@ -30,6 +30,7 @@ function connectBedrockClient() {
     const mcClient = bedrock.createClient({
       host: CONFIG.MC_HOST,
       port: CONFIG.MC_PORT,
+      username: 'BotStatus', // <--- Nome de utilizador obrigatório para o cliente fake
       offline: true,
       connectTimeout: 10000
     });
