@@ -1,7 +1,7 @@
 {
   "name": "minecraft-discord-bot",
   "version": "1.0.0",
-  "description": "Bot do Discord para monitorar nicks no Bedrock",
+  "description": "Bot do Discord com Fake Client para Bedrock",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
