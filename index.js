@@ -43,28 +43,27 @@ const CONFIG = {
   MC_USERNAME: process.env.MC_USERNAME || 'BotStatus',
 
   MC_VERSION: '1.26.51',
-
-  // Seu servidor exigiu autenticação Microsoft.
   MC_OFFLINE: false,
 
   ONLINE_CHANNEL_ID: process.env.ONLINE_CHANNEL_ID || null,
-
   REGISTRATION_CHANNEL_ID:
     process.env.REGISTRATION_CHANNEL_ID || null
 };
 
+const TEMPO_RECONEXAO = 10000;
+
 if (!CONFIG.DISCORD_TOKEN) {
-  console.error('❌ A variável DISCORD_TOKEN não foi configurada.');
+  console.error('❌ DISCORD_TOKEN não foi configurado.');
   process.exit(1);
 }
 
 if (!CONFIG.CLIENT_ID) {
-  console.error('❌ A variável CLIENT_ID não foi configurada.');
+  console.error('❌ CLIENT_ID não foi configurado.');
   process.exit(1);
 }
 
 // ============================================================
-// CLIENTE DISCORD
+// CLIENTE DO DISCORD
 // ============================================================
 
 const discordClient = new Client({
@@ -81,13 +80,13 @@ let mcClient = null;
 let tentandoConectar = false;
 let reconnectTimer = null;
 
-// Status: uma mensagem editada a cada 30 segundos.
+// Status atualizado a cada 30 segundos.
 let canalAtualizacaoId = CONFIG.ONLINE_CHANNEL_ID;
 let mensagemAtualizacaoId = null;
 let intervaloAtualizacao = null;
 let atualizandoMensagem = false;
 
-// Registro: novas mensagens a cada 45 segundos.
+// Registros acumulativos a cada 45 segundos.
 let canalRegistroId = CONFIG.REGISTRATION_CHANNEL_ID;
 let intervaloRegistro = null;
 let registrandoJogadores = false;
@@ -103,12 +102,11 @@ function eAdministrador(interaction) {
 }
 
 function respostaPrivada() {
-  // 64 = MessageFlags.Ephemeral
   return { flags: 64 };
 }
 
 // ============================================================
-// JOGADORES
+// JOGADORES ONLINE
 // ============================================================
 
 function obterIdJogador(jogador) {
@@ -121,11 +119,9 @@ function obterIdJogador(jogador) {
     jogador.name ??
     jogador.gamertag;
 
-  if (id === undefined || id === null) {
-    return null;
-  }
-
-  return String(id);
+  return id === undefined || id === null
+    ? null
+    : String(id);
 }
 
 function obterNomeJogador(jogador) {
@@ -137,11 +133,7 @@ function obterNomeJogador(jogador) {
     jogador.skin_data?.display_name ??
     jogador.player_name;
 
-  if (!nome) {
-    return null;
-  }
-
-  return String(nome);
+  return nome ? String(nome) : null;
 }
 
 function obterNomesJogadores() {
@@ -174,17 +166,12 @@ function extrairRegistrosPlayerList(packet) {
   return [];
 }
 
-function obterTipoPlayerList(packet) {
-  return (
+function playerListEstaRemovendo(packet) {
+  const tipo =
     packet?.records?.type ??
     packet?.type ??
     packet?.action ??
-    'add'
-  );
-}
-
-function playerListEstaRemovendo(packet) {
-  const tipo = obterTipoPlayerList(packet);
+    'add';
 
   return (
     tipo === 1 ||
@@ -208,10 +195,6 @@ function processarListaDeJogadores(packet) {
     const id = obterIdJogador(jogador);
     const nome = obterNomeJogador(jogador);
 
-    /*
-     * Em pacotes de remoção, normalmente o UUID/XUID existe,
-     * mas o username pode não existir.
-     */
     if (removendo) {
       if (id) {
         jogadoresOnline.delete(id);
@@ -228,19 +211,16 @@ function processarListaDeJogadores(packet) {
   const nomes = obterNomesJogadores();
 
   console.log(
-    `✅ Lista processada: ${nomes.length} jogador(es)`,
-    nomes.length > 0 ? nomes.join(', ') : 'nenhum'
+    `✅ Lista processada: ${nomes.length} jogador(es):`,
+    nomes.join(', ') || 'nenhum'
   );
 
-  /*
-   * Atualiza imediatamente quando o servidor informa alteração.
-   * O intervalo de 30 segundos também continuará funcionando.
-   */
+  // Atualiza imediatamente quando alguém entra ou sai.
   atualizarMensagemOnline();
 }
 
 // ============================================================
-// EMBED DO STATUS ONLINE
+// EMBEDS
 // ============================================================
 
 function criarEmbedOnline() {
@@ -283,10 +263,6 @@ function criarEmbedOnline() {
     })
     .setTimestamp();
 }
-
-// ============================================================
-// EMBED DO REGISTRO
-// ============================================================
 
 function criarEmbedRegistro() {
   const nomes = obterNomesJogadores();
@@ -336,7 +312,7 @@ function criarEmbedRegistro() {
 }
 
 // ============================================================
-// STATUS AUTOMÁTICO A CADA 30 SEGUNDOS
+// STATUS AUTOMÁTICO — 30 SEGUNDOS
 // ============================================================
 
 async function atualizarMensagemOnline() {
@@ -405,10 +381,8 @@ function iniciarAtualizacaoAutomatica() {
     return;
   }
 
-  // Envia imediatamente.
   atualizarMensagemOnline();
 
-  // Depois atualiza a cada 30 segundos.
   intervaloAtualizacao = setInterval(() => {
     atualizarMensagemOnline();
   }, 30000);
@@ -429,7 +403,7 @@ function pararAtualizacaoAutomatica() {
 }
 
 // ============================================================
-// REGISTROS ACUMULATIVOS A CADA 45 SEGUNDOS
+// REGISTROS ACUMULATIVOS — 45 SEGUNDOS
 // ============================================================
 
 async function registrarJogadoresOnline() {
@@ -449,10 +423,7 @@ async function registrarJogadoresOnline() {
       return;
     }
 
-    /*
-     * Sempre envia uma NOVA mensagem.
-     * Nenhum registro anterior é editado ou apagado.
-     */
+    // Sempre cria uma nova mensagem.
     await canal.send({
       embeds: [criarEmbedRegistro()]
     });
@@ -477,10 +448,8 @@ function iniciarRegistroAutomatico() {
     return;
   }
 
-  // Primeiro registro imediatamente.
   registrarJogadoresOnline();
 
-  // Novo registro a cada 45 segundos.
   intervaloRegistro = setInterval(() => {
     registrarJogadoresOnline();
   }, 45000);
@@ -500,21 +469,23 @@ function pararRegistroAutomatico() {
 }
 
 // ============================================================
-// CONEXÃO BEDROCK
+// RECONEXÃO BEDROCK
 // ============================================================
 
 function agendarReconexao() {
-  if (reconnectTimer) {
+  // Impede várias tentativas simultâneas.
+  if (reconnectTimer || tentandoConectar) {
     return;
   }
 
-  console.log('🔌 Conexão Bedrock fechada.');
-  console.log('🔄 Tentando reconectar em 10 segundos...');
+  console.log(
+    `🔄 Tentando reconectar em ${TEMPO_RECONEXAO / 1000} segundos...`
+  );
 
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
     conectarBedrock();
-  }, 10000);
+  }, TEMPO_RECONEXAO);
 }
 
 function conectarBedrock() {
@@ -560,9 +531,6 @@ function conectarBedrock() {
       console.log('✅ Bot apareceu no mundo!');
     });
 
-    /*
-     * Este é o único listener que processa player_list.
-     */
     mcClient.on('player_list', (packet) => {
       console.log('📋 Pacote player_list recebido.');
       processarListaDeJogadores(packet);
@@ -579,8 +547,11 @@ function conectarBedrock() {
     });
 
     mcClient.on('error', (error) => {
-      tentandoConectar = false;
-
+      /*
+       * Esse erro já ocorreu por causa do pacote camera_presets
+       * na compatibilidade experimental. Ele não deve derrubar
+       * o processo do bot.
+       */
       if (error?.partialReadError) {
         console.warn(
           '⚠️ Pacote Bedrock incompatível ignorado:',
@@ -590,24 +561,40 @@ function conectarBedrock() {
         return;
       }
 
+      tentandoConectar = false;
+
       console.error('⚠️ Erro no protocolo Bedrock:');
       console.error(error);
+
+      /*
+       * Não agendamos outra tentativa aqui.
+       * Se a conexão for fechada, o evento "close" fará isso.
+       */
+      try {
+        mcClient?.close();
+      } catch (closeError) {
+        console.error('Erro ao fechar conexão:', closeError);
+      }
     });
 
+    /*
+     * Este é o ponto principal da reconexão.
+     * Qualquer fechamento real da conexão passa por aqui.
+     */
     mcClient.on('close', () => {
+      console.log('🔌 Bot desconectado do servidor Bedrock.');
+
       tentandoConectar = false;
       mcClient = null;
 
-      /*
-       * Só limpa a lista quando a conexão realmente fecha.
-       * Não limpe no evento "disconnect".
-       */
       limparJogadores();
 
+      // A lista do Discord ficará vazia até a reconexão.
       agendarReconexao();
     });
   } catch (error) {
     tentandoConectar = false;
+    mcClient = null;
 
     console.error('❌ Erro ao criar cliente Bedrock:');
     console.error(error);
@@ -617,7 +604,7 @@ function conectarBedrock() {
 }
 
 // ============================================================
-// COMANDOS
+// COMANDOS DO DISCORD
 // ============================================================
 
 const commands = [
@@ -651,7 +638,7 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName('configurar-registro')
-    .setDescription('Escolhe o canal dos registros acumulativos')
+    .setDescription('Escolhe o canal dos registros')
     .addChannelOption(option =>
       option
         .setName('canal')
@@ -665,7 +652,7 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName('parar-registro')
-    .setDescription('Para os registros acumulativos')
+    .setDescription('Para os registros automáticos')
     .setDefaultMemberPermissions(
       PermissionFlagsBits.Administrator.toString()
     )
@@ -691,7 +678,7 @@ async function registrarComandos() {
 }
 
 // ============================================================
-// EVENTOS DO DISCORD
+// INTERAÇÕES DO DISCORD
 // ============================================================
 
 discordClient.once(Events.ClientReady, async (client) => {
@@ -715,7 +702,6 @@ discordClient.on(Events.InteractionCreate, async (interaction) => {
     return;
   }
 
-  // Todos os comandos são somente para administradores.
   if (!eAdministrador(interaction)) {
     await interaction.reply({
       content: '❌ Apenas administradores podem usar os comandos deste bot.',
@@ -748,7 +734,6 @@ discordClient.on(Events.InteractionCreate, async (interaction) => {
     canalAtualizacaoId = canal.id;
     mensagemAtualizacaoId = null;
 
-    // Cria a mensagem imediatamente no canal escolhido.
     iniciarAtualizacaoAutomatica();
 
     await interaction.reply({
