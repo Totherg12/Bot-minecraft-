@@ -36,7 +36,7 @@ function connectBedrockClient() {
       username: 'BotStatus',
       version: '1.26.51', // <--- Força a versão exata exigida pelo servidor[span_4](start_span)[span_4](end_span)
       offline: true,
-      connectTimeout: 15000
+      connectTimeout: 15000,
       conLog: console.log
     });
 
