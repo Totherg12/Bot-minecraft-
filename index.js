@@ -43,21 +43,23 @@ const CONFIG = {
   MC_USERNAME: process.env.MC_USERNAME || 'BotStatus',
 
   MC_VERSION: '1.26.51',
+
+  // Seu servidor exigiu autenticação Microsoft.
   MC_OFFLINE: false,
 
-  // Opcional. Pode ser configurado pelos comandos.
   ONLINE_CHANNEL_ID: process.env.ONLINE_CHANNEL_ID || null,
+
   REGISTRATION_CHANNEL_ID:
     process.env.REGISTRATION_CHANNEL_ID || null
 };
 
 if (!CONFIG.DISCORD_TOKEN) {
-  console.error('❌ DISCORD_TOKEN não foi configurado.');
+  console.error('❌ A variável DISCORD_TOKEN não foi configurada.');
   process.exit(1);
 }
 
 if (!CONFIG.CLIENT_ID) {
-  console.error('❌ CLIENT_ID não foi configurado.');
+  console.error('❌ A variável CLIENT_ID não foi configurada.');
   process.exit(1);
 }
 
@@ -76,16 +78,16 @@ const discordClient = new Client({
 const jogadoresOnline = new Map();
 
 let mcClient = null;
-let reconnectTimer = null;
 let tentandoConectar = false;
+let reconnectTimer = null;
 
-// Mensagem única de status, atualizada a cada 30 segundos.
+// Status: uma mensagem editada a cada 30 segundos.
 let canalAtualizacaoId = CONFIG.ONLINE_CHANNEL_ID;
 let mensagemAtualizacaoId = null;
 let intervaloAtualizacao = null;
 let atualizandoMensagem = false;
 
-// Registros acumulativos, enviados a cada 45 segundos.
+// Registro: novas mensagens a cada 45 segundos.
 let canalRegistroId = CONFIG.REGISTRATION_CHANNEL_ID;
 let intervaloRegistro = null;
 let registrandoJogadores = false;
@@ -100,29 +102,46 @@ function eAdministrador(interaction) {
   );
 }
 
+function respostaPrivada() {
+  // 64 = MessageFlags.Ephemeral
+  return { flags: 64 };
+}
+
 // ============================================================
-// JOGADORES ONLINE
+// JOGADORES
 // ============================================================
 
 function obterIdJogador(jogador) {
-  return (
-    jogador.uuid ||
-    jogador.xuid ||
-    jogador.entity_unique_id ||
-    jogador.entity_runtime_id ||
-    jogador.username ||
-    jogador.name
-  );
+  const id =
+    jogador.uuid ??
+    jogador.xuid ??
+    jogador.entity_unique_id ??
+    jogador.entity_runtime_id ??
+    jogador.username ??
+    jogador.name ??
+    jogador.gamertag;
+
+  if (id === undefined || id === null) {
+    return null;
+  }
+
+  return String(id);
 }
 
 function obterNomeJogador(jogador) {
-  return (
-    jogador.username ||
-    jogador.name ||
-    jogador.gamertag ||
-    jogador.display_name ||
-    null
-  );
+  const nome =
+    jogador.username ??
+    jogador.name ??
+    jogador.gamertag ??
+    jogador.display_name ??
+    jogador.skin_data?.display_name ??
+    jogador.player_name;
+
+  if (!nome) {
+    return null;
+  }
+
+  return String(nome);
 }
 
 function obterNomesJogadores() {
@@ -135,54 +154,88 @@ function limparJogadores() {
   jogadoresOnline.clear();
 }
 
-function processarListaDeJogadores(packet) {
+function extrairRegistrosPlayerList(packet) {
   if (!packet) {
-    return;
+    return [];
   }
 
-  const recordsContainer = packet.records || {};
-
-  const registros = Array.isArray(recordsContainer.records)
-    ? recordsContainer.records
-    : [];
-
-  if (registros.length === 0) {
-    return;
+  if (Array.isArray(packet.records?.records)) {
+    return packet.records.records;
   }
 
-  const tipo = recordsContainer.type;
+  if (Array.isArray(packet.records)) {
+    return packet.records;
+  }
 
-  // 0/add = adiciona; 1/remove = remove.
-  const removendo =
+  if (Array.isArray(packet.entries)) {
+    return packet.entries;
+  }
+
+  return [];
+}
+
+function obterTipoPlayerList(packet) {
+  return (
+    packet?.records?.type ??
+    packet?.type ??
+    packet?.action ??
+    'add'
+  );
+}
+
+function playerListEstaRemovendo(packet) {
+  const tipo = obterTipoPlayerList(packet);
+
+  return (
     tipo === 1 ||
     tipo === 'remove' ||
-    tipo === 'REMOVE';
+    tipo === 'REMOVE' ||
+    tipo === 'Remove'
+  );
+}
+
+function processarListaDeJogadores(packet) {
+  const registros = extrairRegistrosPlayerList(packet);
+
+  if (registros.length === 0) {
+    console.log('📦 player_list recebido sem registros.');
+    return;
+  }
+
+  const removendo = playerListEstaRemovendo(packet);
 
   for (const jogador of registros) {
     const id = obterIdJogador(jogador);
     const nome = obterNomeJogador(jogador);
 
-    if (!id) {
+    /*
+     * Em pacotes de remoção, normalmente o UUID/XUID existe,
+     * mas o username pode não existir.
+     */
+    if (removendo) {
+      if (id) {
+        jogadoresOnline.delete(id);
+      }
+
       continue;
     }
 
-    const chave = String(id);
-
-    if (removendo) {
-      jogadoresOnline.delete(chave);
-    } else if (nome) {
-      jogadoresOnline.set(chave, nome);
+    if (id && nome) {
+      jogadoresOnline.set(id, nome);
     }
   }
 
   const nomes = obterNomesJogadores();
 
   console.log(
-    `👥 Lista atualizada (${nomes.length} jogadores):`,
-    nomes.join(', ') || 'nenhum'
+    `✅ Lista processada: ${nomes.length} jogador(es)`,
+    nomes.length > 0 ? nomes.join(', ') : 'nenhum'
   );
 
-  // Atualiza imediatamente quando alguém entra ou sai.
+  /*
+   * Atualiza imediatamente quando o servidor informa alteração.
+   * O intervalo de 30 segundos também continuará funcionando.
+   */
   atualizarMensagemOnline();
 }
 
@@ -232,7 +285,7 @@ function criarEmbedOnline() {
 }
 
 // ============================================================
-// EMBED DOS REGISTROS
+// EMBED DO REGISTRO
 // ============================================================
 
 function criarEmbedRegistro() {
@@ -283,7 +336,7 @@ function criarEmbedRegistro() {
 }
 
 // ============================================================
-// STATUS AUTOMÁTICO — A CADA 30 SEGUNDOS
+// STATUS AUTOMÁTICO A CADA 30 SEGUNDOS
 // ============================================================
 
 async function atualizarMensagemOnline() {
@@ -321,7 +374,9 @@ async function atualizarMensagemOnline() {
         embeds: [embed]
       });
 
-      console.log('🔄 Status online atualizado.');
+      console.log(
+        `🔄 Status atualizado com ${obterNomesJogadores().length} jogador(es).`
+      );
     } else {
       mensagem = await canal.send({
         embeds: [embed]
@@ -329,7 +384,7 @@ async function atualizarMensagemOnline() {
 
       mensagemAtualizacaoId = mensagem.id;
 
-      console.log('✅ Mensagem de status criada no canal.');
+      console.log('✅ Mensagem de status criada.');
     }
   } catch (error) {
     console.error('❌ Erro ao atualizar status online:');
@@ -350,7 +405,7 @@ function iniciarAtualizacaoAutomatica() {
     return;
   }
 
-  // Envia imediatamente ao escolher o canal.
+  // Envia imediatamente.
   atualizarMensagemOnline();
 
   // Depois atualiza a cada 30 segundos.
@@ -374,7 +429,7 @@ function pararAtualizacaoAutomatica() {
 }
 
 // ============================================================
-// REGISTROS ACUMULATIVOS — A CADA 45 SEGUNDOS
+// REGISTROS ACUMULATIVOS A CADA 45 SEGUNDOS
 // ============================================================
 
 async function registrarJogadoresOnline() {
@@ -394,8 +449,10 @@ async function registrarJogadoresOnline() {
       return;
     }
 
-    // Sempre cria uma mensagem nova.
-    // Registros anteriores não são editados nem apagados.
+    /*
+     * Sempre envia uma NOVA mensagem.
+     * Nenhum registro anterior é editado ou apagado.
+     */
     await canal.send({
       embeds: [criarEmbedRegistro()]
     });
@@ -443,7 +500,7 @@ function pararRegistroAutomatico() {
 }
 
 // ============================================================
-// CONEXÃO COM O MINECRAFT BEDROCK
+// CONEXÃO BEDROCK
 // ============================================================
 
 function agendarReconexao() {
@@ -503,7 +560,11 @@ function conectarBedrock() {
       console.log('✅ Bot apareceu no mundo!');
     });
 
+    /*
+     * Este é o único listener que processa player_list.
+     */
     mcClient.on('player_list', (packet) => {
+      console.log('📋 Pacote player_list recebido.');
       processarListaDeJogadores(packet);
     });
 
@@ -520,6 +581,15 @@ function conectarBedrock() {
     mcClient.on('error', (error) => {
       tentandoConectar = false;
 
+      if (error?.partialReadError) {
+        console.warn(
+          '⚠️ Pacote Bedrock incompatível ignorado:',
+          error.message
+        );
+
+        return;
+      }
+
       console.error('⚠️ Erro no protocolo Bedrock:');
       console.error(error);
     });
@@ -528,7 +598,12 @@ function conectarBedrock() {
       tentandoConectar = false;
       mcClient = null;
 
+      /*
+       * Só limpa a lista quando a conexão realmente fecha.
+       * Não limpe no evento "disconnect".
+       */
       limparJogadores();
+
       agendarReconexao();
     });
   } catch (error) {
@@ -542,7 +617,7 @@ function conectarBedrock() {
 }
 
 // ============================================================
-// COMANDOS DO DISCORD
+// COMANDOS
 // ============================================================
 
 const commands = [
@@ -640,19 +715,15 @@ discordClient.on(Events.InteractionCreate, async (interaction) => {
     return;
   }
 
-  // Bloqueio geral: nenhum comando funciona para não administradores.
+  // Todos os comandos são somente para administradores.
   if (!eAdministrador(interaction)) {
     await interaction.reply({
       content: '❌ Apenas administradores podem usar os comandos deste bot.',
-      ephemeral: true
+      ...respostaPrivada()
     });
 
     return;
   }
-
-  // ----------------------------------------------------------
-  // /online
-  // ----------------------------------------------------------
 
   if (interaction.commandName === 'online') {
     await interaction.reply({
@@ -662,58 +733,44 @@ discordClient.on(Events.InteractionCreate, async (interaction) => {
     return;
   }
 
-  // ----------------------------------------------------------
-  // /configurar-online
-  // ----------------------------------------------------------
-
   if (interaction.commandName === 'configurar-online') {
     const canal = interaction.options.getChannel('canal');
 
     if (!canal || canal.type !== ChannelType.GuildText) {
       await interaction.reply({
         content: '❌ Escolha um canal de texto válido.',
-        ephemeral: true
+        ...respostaPrivada()
       });
 
       return;
     }
 
     canalAtualizacaoId = canal.id;
-
-    // Cria uma nova mensagem no canal escolhido.
     mensagemAtualizacaoId = null;
 
-    // Envia imediatamente e inicia o intervalo de 30 segundos.
+    // Cria a mensagem imediatamente no canal escolhido.
     iniciarAtualizacaoAutomatica();
 
     await interaction.reply({
       content:
         `✅ Canal de status definido como ${canal}.\n` +
-        'A mensagem já foi enviada e será atualizada a cada 30 segundos.',
-      ephemeral: true
+        'A mensagem foi enviada e será atualizada a cada 30 segundos.',
+      ...respostaPrivada()
     });
 
     return;
   }
-
-  // ----------------------------------------------------------
-  // /parar-online
-  // ----------------------------------------------------------
 
   if (interaction.commandName === 'parar-online') {
     pararAtualizacaoAutomatica();
 
     await interaction.reply({
       content: '✅ O status automático foi parado.',
-      ephemeral: true
+      ...respostaPrivada()
     });
 
     return;
   }
-
-  // ----------------------------------------------------------
-  // /configurar-registro
-  // ----------------------------------------------------------
 
   if (interaction.commandName === 'configurar-registro') {
     const canal = interaction.options.getChannel('canal');
@@ -721,7 +778,7 @@ discordClient.on(Events.InteractionCreate, async (interaction) => {
     if (!canal || canal.type !== ChannelType.GuildText) {
       await interaction.reply({
         content: '❌ Escolha um canal de texto válido.',
-        ephemeral: true
+        ...respostaPrivada()
       });
 
       return;
@@ -735,22 +792,18 @@ discordClient.on(Events.InteractionCreate, async (interaction) => {
       content:
         `✅ Canal de registro definido como ${canal}.\n` +
         'Uma nova mensagem será enviada a cada 45 segundos.',
-      ephemeral: true
+      ...respostaPrivada()
     });
 
     return;
   }
-
-  // ----------------------------------------------------------
-  // /parar-registro
-  // ----------------------------------------------------------
 
   if (interaction.commandName === 'parar-registro') {
     pararRegistroAutomatico();
 
     await interaction.reply({
       content: '✅ Os registros automáticos foram parados.',
-      ephemeral: true
+      ...respostaPrivada()
     });
   }
 });
