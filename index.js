@@ -1,3 +1,4 @@
+// Deixe vazio para não gerar milhares de linhas de debug no Render.
 process.env.DEBUG = '';
 
 const {
@@ -7,7 +8,9 @@ const {
   Routes,
   SlashCommandBuilder,
   EmbedBuilder,
-  Events
+  Events,
+  ChannelType,
+  PermissionFlagsBits
 } = require('discord.js');
 
 const bedrock = require('bedrock-protocol');
@@ -43,8 +46,11 @@ const CONFIG = {
   // Seu fork experimental precisa aceitar esta versão.
   MC_VERSION: '1.26.51',
 
-  // false é necessário no seu servidor.
-  MC_OFFLINE: false
+  // No seu servidor, false foi necessário.
+  MC_OFFLINE: false,
+
+  // Canal opcional. Pode ser configurado também pelo comando.
+  ONLINE_CHANNEL_ID: process.env.ONLINE_CHANNEL_ID || null
 };
 
 if (!CONFIG.DISCORD_TOKEN) {
@@ -66,15 +72,19 @@ const discordClient = new Client({
 });
 
 // ============================================================
-// ESTADO DO BOT
+// VARIÁVEIS DO BOT
 // ============================================================
 
-// A chave é o UUID/XUID e o valor é o nick.
 const jogadoresOnline = new Map();
 
 let mcClient = null;
 let reconnectTimer = null;
 let tentandoConectar = false;
+
+let canalAtualizacaoId = CONFIG.ONLINE_CHANNEL_ID;
+let mensagemAtualizacaoId = null;
+let intervaloAtualizacao = null;
+let atualizandoMensagem = false;
 
 // ============================================================
 // FUNÇÕES DOS JOGADORES
@@ -101,31 +111,20 @@ function obterNomeJogador(jogador) {
   );
 }
 
-function limparJogadores() {
-  jogadoresOnline.clear();
-}
-
 function obterNomesJogadores() {
   return [...new Set([...jogadoresOnline.values()])]
     .filter(Boolean)
     .sort((a, b) => a.localeCompare(b, 'pt-BR'));
 }
 
-// ============================================================
-// LEITURA DO PACOTE PLAYER_LIST
-// ============================================================
+function limparJogadores() {
+  jogadoresOnline.clear();
+}
 
 function processarListaDeJogadores(packet) {
   if (!packet) {
     return;
   }
-
-  /*
-   * Formato normal:
-   *
-   * packet.records.type
-   * packet.records.records
-   */
 
   const recordsContainer = packet.records || {};
 
@@ -141,11 +140,10 @@ function processarListaDeJogadores(packet) {
 
   const tipo = recordsContainer.type ?? packet.type ?? 'add';
 
-  // Dependendo da versão, remove pode vir como "remove" ou número 1.
   const removendo =
     tipo === 'remove' ||
-    tipo === 1 ||
-    tipo === 'REMOVE';
+    tipo === 'REMOVE' ||
+    tipo === 1;
 
   for (const jogador of registros) {
     const id = obterIdJogador(jogador);
@@ -159,10 +157,7 @@ function processarListaDeJogadores(packet) {
 
     if (removendo) {
       jogadoresOnline.delete(chave);
-      continue;
-    }
-
-    if (nome) {
+    } else if (nome) {
       jogadoresOnline.set(chave, nome);
     }
   }
@@ -174,6 +169,140 @@ function processarListaDeJogadores(packet) {
 }
 
 // ============================================================
+// EMBED DA LISTA ONLINE
+// ============================================================
+
+function criarEmbedOnline() {
+  const nomes = obterNomesJogadores();
+
+  const lista = nomes.length > 0
+    ? nomes.map(nome => `• ${nome}`).join('\n')
+    : 'Nenhum jogador foi detectado ainda.';
+
+  // O Discord permite no máximo 1024 caracteres por campo.
+  const listaLimitada = lista.length > 1024
+    ? `${lista.substring(0, 1000)}\n...`
+    : lista;
+
+  return new EmbedBuilder()
+    .setColor('#00FF00')
+    .setTitle('🟢 Jogadores online')
+    .addFields(
+      {
+        name: '👥 Total',
+        value: String(nomes.length),
+        inline: true
+      },
+      {
+        name: '🌐 Servidor',
+        value: `\`${CONFIG.MC_HOST}:${CONFIG.MC_PORT}\``,
+        inline: true
+      },
+      {
+        name: '🎮 Versão',
+        value: `\`${CONFIG.MC_VERSION}\``,
+        inline: true
+      },
+      {
+        name: '📜 Nicks',
+        value: listaLimitada
+      }
+    )
+    .setFooter({
+      text: 'Atualizado automaticamente a cada 30 segundos'
+    })
+    .setTimestamp();
+}
+
+// ============================================================
+// ATUALIZAÇÃO AUTOMÁTICA NO CANAL
+// ============================================================
+
+async function atualizarMensagemOnline() {
+  if (!canalAtualizacaoId || atualizandoMensagem) {
+    return;
+  }
+
+  atualizandoMensagem = true;
+
+  try {
+    const canal = await discordClient.channels.fetch(canalAtualizacaoId);
+
+    if (!canal || !canal.isTextBased()) {
+      console.error('❌ O canal configurado não é um canal de texto.');
+      return;
+    }
+
+    const embed = criarEmbedOnline();
+    let mensagem = null;
+
+    // Tenta editar a mensagem anterior.
+    if (mensagemAtualizacaoId) {
+      try {
+        mensagem = await canal.messages.fetch(mensagemAtualizacaoId);
+      } catch {
+        mensagem = null;
+      }
+    }
+
+    if (mensagem) {
+      await mensagem.edit({
+        embeds: [embed]
+      });
+
+      console.log('🔄 Mensagem online atualizada.');
+    } else {
+      mensagem = await canal.send({
+        embeds: [embed]
+      });
+
+      mensagemAtualizacaoId = mensagem.id;
+
+      console.log('✅ Mensagem online criada.');
+    }
+  } catch (error) {
+    console.error('❌ Erro ao atualizar a mensagem online:');
+    console.error(error.message);
+  } finally {
+    atualizandoMensagem = false;
+  }
+}
+
+function iniciarAtualizacaoAutomatica() {
+  if (intervaloAtualizacao) {
+    clearInterval(intervaloAtualizacao);
+    intervaloAtualizacao = null;
+  }
+
+  if (!canalAtualizacaoId) {
+    console.log('ℹ️ Nenhum canal automático foi configurado.');
+    return;
+  }
+
+  // Atualiza imediatamente ao iniciar.
+  atualizarMensagemOnline();
+
+  // Depois atualiza a cada 30 segundos.
+  intervaloAtualizacao = setInterval(() => {
+    atualizarMensagemOnline();
+  }, 30000);
+
+  console.log('🔄 Atualização automática iniciada a cada 30 segundos.');
+}
+
+function pararAtualizacaoAutomatica() {
+  if (intervaloAtualizacao) {
+    clearInterval(intervaloAtualizacao);
+    intervaloAtualizacao = null;
+  }
+
+  canalAtualizacaoId = null;
+  mensagemAtualizacaoId = null;
+
+  console.log('⏹️ Atualização automática parada.');
+}
+
+// ============================================================
 // CONEXÃO COM O SERVIDOR BEDROCK
 // ============================================================
 
@@ -182,7 +311,7 @@ function agendarReconexao() {
     return;
   }
 
-  console.log('🔌 Conexão fechada. Tentando reconectar em 10 segundos...');
+  console.log('🔌 Conexão fechada. Tentando novamente em 10 segundos...');
 
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
@@ -209,15 +338,14 @@ function conectarBedrock() {
       username: CONFIG.MC_USERNAME,
 
       /*
-       * Esta opção depende da alteração experimental no seu fork:
-       *
-       * versão recebida: 1.26.51
-       * dados usados internamente: 1.26.45
+       * Usa o patch experimental no seu fork:
+       * versão informada: 1.26.51
+       * dados internos: 1.26.45
        * protocolo enviado: 2193
        */
       version: CONFIG.MC_VERSION,
 
-      // No seu caso precisa ser false.
+      // No seu servidor precisa ser false.
       offline: CONFIG.MC_OFFLINE,
 
       connectTimeout: 15000,
@@ -250,12 +378,12 @@ function conectarBedrock() {
 
     mcClient.on('kick', (packet) => {
       console.error('🚫 O servidor expulsou o bot:');
-      console.error(JSON.stringify(packet, null, 2));
+      console.error(packet);
     });
 
     mcClient.on('disconnect', (packet) => {
-      console.error('🚫 O servidor enviou desconexão:');
-      console.error(JSON.stringify(packet, null, 2));
+      console.error('🚫 O servidor enviou uma desconexão:');
+      console.error(packet);
     });
 
     mcClient.on('error', (error) => {
@@ -272,18 +400,6 @@ function conectarBedrock() {
       limparJogadores();
       agendarReconexao();
     });
-
-    /*
-     * Este evento não mostra todos os pacotes.
-     * Ele serve apenas para confirmar o formato do player_list.
-     */
-    mcClient.on('packet', (data) => {
-  if (data?.data?.name === 'player_list') {
-    console.log('📦 Pacote player_list recebido');
-
-    processarListaDeJogadores(data.data.params);
-  }
-});
   } catch (error) {
     tentandoConectar = false;
 
@@ -301,7 +417,28 @@ function conectarBedrock() {
 const commands = [
   new SlashCommandBuilder()
     .setName('online')
-    .setDescription('Mostra os jogadores online no Minecraft')
+    .setDescription('Mostra os jogadores online no Minecraft'),
+
+  new SlashCommandBuilder()
+    .setName('configurar-online')
+    .setDescription('Escolhe o canal da mensagem automática')
+    .addChannelOption(option =>
+      option
+        .setName('canal')
+        .setDescription('Canal onde a lista será atualizada')
+        .addChannelTypes(ChannelType.GuildText)
+        .setRequired(true)
+    )
+    .setDefaultMemberPermissions(
+      PermissionFlagsBits.ManageGuild.toString()
+    ),
+
+  new SlashCommandBuilder()
+    .setName('parar-online')
+    .setDescription('Para a atualização automática da lista')
+    .setDefaultMemberPermissions(
+      PermissionFlagsBits.ManageGuild.toString()
+    )
 ].map(command => command.toJSON());
 
 async function registrarComandos() {
@@ -316,9 +453,9 @@ async function registrarComandos() {
       }
     );
 
-    console.log('✅ Comando /online registrado!');
+    console.log('✅ Comandos registrados com sucesso!');
   } catch (error) {
-    console.error('❌ Erro ao registrar o comando /online:');
+    console.error('❌ Erro ao registrar comandos:');
     console.error(error);
   }
 }
@@ -333,6 +470,12 @@ discordClient.once(Events.ClientReady, async (client) => {
   await registrarComandos();
 
   conectarBedrock();
+
+  // Se ONLINE_CHANNEL_ID estiver configurado no Render,
+  // a atualização começa automaticamente.
+  if (canalAtualizacaoId) {
+    iniciarAtualizacaoAutomatica();
+  }
 });
 
 discordClient.on(Events.InteractionCreate, async (interaction) => {
@@ -340,47 +483,62 @@ discordClient.on(Events.InteractionCreate, async (interaction) => {
     return;
   }
 
-  if (interaction.commandName !== 'online') {
+  // ==========================================================
+  // /online
+  // ==========================================================
+
+  if (interaction.commandName === 'online') {
+    await interaction.reply({
+      embeds: [criarEmbedOnline()]
+    });
+
     return;
   }
 
-  const nomes = obterNomesJogadores();
+  // ==========================================================
+  // /configurar-online canal:#canal
+  // ==========================================================
 
-  const lista = nomes.length > 0
-    ? nomes.map(nome => `• ${nome}`).join('\n')
-    : 'Nenhum jogador foi detectado ainda.';
+  if (interaction.commandName === 'configurar-online') {
+    const canal = interaction.options.getChannel('canal');
 
-  const listaLimitada = lista.length > 1024
-    ? `${lista.substring(0, 1000)}\n...`
-    : lista;
+    if (!canal || canal.type !== ChannelType.GuildText) {
+      await interaction.reply({
+        content: '❌ Escolha um canal de texto válido.',
+        ephemeral: true
+      });
 
-  const embed = new EmbedBuilder()
-    .setColor('#00FF00')
-    .setTitle('🟢 Jogadores online')
-    .addFields(
-      {
-        name: '👥 Total',
-        value: String(nomes.length),
-        inline: true
-      },
-      {
-        name: '🌐 Servidor',
-        value: `\`${CONFIG.MC_HOST}:${CONFIG.MC_PORT}\``,
-        inline: true
-      },
-      {
-        name: '📜 Nicks',
-        value: listaLimitada
-      }
-    )
-    .setFooter({
-      text: 'Lista obtida pelo cliente Bedrock'
-    })
-    .setTimestamp();
+      return;
+    }
 
-  await interaction.reply({
-    embeds: [embed]
-  });
+    canalAtualizacaoId = canal.id;
+
+    // Faz o bot criar uma nova mensagem nesse canal.
+    mensagemAtualizacaoId = null;
+
+    iniciarAtualizacaoAutomatica();
+
+    await interaction.reply({
+      content:
+        `✅ A lista será atualizada automaticamente a cada 30 segundos em ${canal}.`,
+      ephemeral: true
+    });
+
+    return;
+  }
+
+  // ==========================================================
+  // /parar-online
+  // ==========================================================
+
+  if (interaction.commandName === 'parar-online') {
+    pararAtualizacaoAutomatica();
+
+    await interaction.reply({
+      content: '✅ A atualização automática foi parada.',
+      ephemeral: true
+    });
+  }
 });
 
 discordClient.on(Events.Error, (error) => {
@@ -392,7 +550,8 @@ discordClient.on(Events.Error, (error) => {
 // LOGIN DO DISCORD
 // ============================================================
 
-discordClient.login(CONFIG.DISCORD_TOKEN)
+discordClient
+  .login(CONFIG.DISCORD_TOKEN)
   .then(() => {
     console.log('🔄 Login do Discord iniciado...');
   })
@@ -400,3 +559,4 @@ discordClient.login(CONFIG.DISCORD_TOKEN)
     console.error('❌ Não foi possível conectar ao Discord:');
     console.error(error);
   });
+ 
