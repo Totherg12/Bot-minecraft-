@@ -30,7 +30,8 @@ function connectBedrockClient() {
     const mcClient = bedrock.createClient({
       host: CONFIG.MC_HOST,
       port: CONFIG.MC_PORT,
-      username: 'BotStatus', // <--- Nome de utilizador obrigatório para o cliente fake
+      username: 'BotStatus',
+      version: '1.26.51', // <--- Força a versão exata exigida pelo servidor
       offline: true,
       connectTimeout: 10000
     });
@@ -109,4 +110,3 @@ client.on(Events.InteractionCreate, async (interaction) => {
 });
 
 client.login(CONFIG.DISCORD_TOKEN);
- 
