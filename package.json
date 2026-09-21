@@ -7,7 +7,7 @@
     "start": "node index.js"
   },
   "dependencies": {
-    "bedrock-protocol": "^1.30.0",
+    "bedrock-protocol": "latest",
     "discord.js": "^14.14.1",
     "express": "^4.19.2"
   }
