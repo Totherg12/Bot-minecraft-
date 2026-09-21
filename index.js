@@ -31,7 +31,7 @@ function connectBedrockClient() {
       host: CONFIG.MC_HOST,
       port: CONFIG.MC_PORT,
       username: 'BotStatus',
-      version: '1.26.51', // <--- Força a versão exata exigida pelo servidor[span_4](start_span)[span_4](end_span)
+      version: '1.26.50', // <--- Força a versão exata exigida pelo servidor[span_4](start_span)[span_4](end_span)
       offline: true,
       connectTimeout: 10000
     });
