@@ -1,22 +1,19 @@
 const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuilder, Events } = require('discord.js');
+const bedrock = require('bedrock-protocol');
 const express = require('express');
-const dns = require('dns');
 
-dns.setDefaultResultOrder('ipv4first');
-
-// Servidor Express HTTP obrigatório para o Render manter o bot acordado
+// Servidor HTTP obrigatório para o Render manter o bot acordado 24/7
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.get('/', (req, res) => {
-  res.send('🤖 Bot do Minecraft Bedrock está online e operando!');
+  res.send('🤖 Bot do Minecraft Bedrock com Fake Client está online!');
 });
 
 app.listen(PORT, () => {
   console.log(`Servidor HTTP rodando na porta ${PORT}`);
 });
 
-// Configurações do Bot (serão puxadas das Variáveis de Ambiente do Render)
 const CONFIG = {
   DISCORD_TOKEN: process.env.DISCORD_TOKEN,
   CLIENT_ID: process.env.CLIENT_ID,
@@ -26,76 +23,77 @@ const CONFIG = {
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
+// Guarda em memória os nicks obtidos diretamente do servidor de jogo
+let cachedPlayers = [];
+let isConnected = false;
+
+function connectBedrockClient() {
+  console.log('🔄 A conectar o cliente fake ao servidor Bedrock...');
+
+  try {
+    const mcClient = bedrock.createClient({
+      host: CONFIG.MC_HOST,
+      port: CONFIG.MC_PORT,
+      offline: true,
+      connectTimeout: 15000
+    });
+
+    mcClient.on('join', () => {
+      console.log('✅ Cliente fake conectado com sucesso ao mundo!');
+      isConnected = true;
+    });
+
+    // Intercepta a lista de jogadores enviada pelo servidor em direto
+    mcClient.on('player_list', (packet) => {
+      if (packet && packet.records && packet.records.records) {
+        // Limpa a lista antiga para atualizar com os nicks atuais
+        cachedPlayers = [];
+        packet.records.records.forEach(player => {
+          if (player.username && !cachedPlayers.includes(player.username)) {
+            cachedPlayers.push(player.username);
+          }
+        });
+      }
+    });
+
+    mcClient.on('error', (err) => {
+      console.error('⚠️ Erro no protocolo Bedrock:', err.message);
+      isConnected = false;
+    });
+
+    mcClient.on('close', () => {
+      console.log('🔌 Conexão fechada. A tentar reconectar em 15 segundos...');
+      isConnected = false;
+      cachedPlayers = [];
+      setTimeout(connectBedrockClient, 15000);
+    });
+
+  } catch (e) {
+    console.error('Falha ao iniciar cliente:', e.message);
+    setTimeout(connectBedrockClient, 15000);
+  }
+}
+
 const commands = [
   new SlashCommandBuilder()
     .setName('online')
-    .setDescription('Exibe os jogadores e o status atual do servidor de Minecraft Bedrock')
+    .setDescription('Exibe os nicks reais dos jogadores online no servidor')
 ].map(command => command.toJSON());
-
-async function getBedrockServerStatus() {
-  try {
-    const res = await fetch('https://api.mcstatus.io/v2/status/bedrock/' + CONFIG.MC_HOST + ':' + CONFIG.MC_PORT);
-    if (res.ok) {
-      const data = await res.json();
-      if (data && data.online) {
-        const playersList = data.players && data.players.list ? data.players.list.map(p => p.name_clean || p.name_raw) : [];
-        return {
-          online: true,
-          playersOnline: data.players ? data.players.online : 0,
-          playersMax: data.players ? data.players.max : 0,
-          list: playersList
-        };
-      }
-    }
-  } catch (err) {
-    console.error('Erro na API:', err.message);
-  }
-
-  try {
-    const res = await fetch('https://api.mcsrvstat.us/bedrock/2/' + CONFIG.MC_HOST + ':' + CONFIG.MC_PORT);
-    if (res.ok) {
-      const data = await res.json();
-      if (data && data.online) {
-        return {
-          online: true,
-          playersOnline: data.players ? data.players.online : 0,
-          playersMax: data.players ? data.players.max : 0,
-          list: data.players && data.players.list ? data.players.list : []
-        };
-      }
-    }
-  } catch (err) {
-    console.error('Erro no fallback:', err.message);
-  }
-
-  return { online: false, playersOnline: 0, playersMax: 0, list: [] };
-}
 
 async function registerCommands() {
   const rest = new REST({ version: '10' }).setToken(CONFIG.DISCORD_TOKEN);
   try {
     await rest.put(Routes.applicationCommands(CONFIG.CLIENT_ID), { body: commands });
-    console.log('Comando /online registrado com sucesso no Discord!');
+    console.log('Comando /online registado com sucesso!');
   } catch (error) {
-    console.error('Erro ao registrar comandos:', error);
+    console.error('Erro ao registar comandos:', error);
   }
 }
 
 client.once(Events.ClientReady, async (c) => {
   console.log(`🤖 Bot conectado como: ${c.user.tag}`);
   await registerCommands();
-
-  const updatePresence = async () => {
-    const status = await getBedrockServerStatus();
-    if (status.online) {
-      client.user.setActivity(`${status.playersOnline}/${status.playersMax} no Bedrock`, { type: 3 });
-    } else {
-      client.user.setActivity('Servidor Offline', { type: 3 });
-    }
-  };
-
-  updatePresence();
-  setInterval(updatePresence, 120000);
+  connectBedrockClient();
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {
@@ -104,34 +102,19 @@ client.on(Events.InteractionCreate, async (interaction) => {
   if (interaction.commandName === 'online') {
     await interaction.deferReply();
 
-    const data = await getBedrockServerStatus();
-
-    if (!data.online) {
-      const offlineEmbed = new EmbedBuilder()
-        .setColor('#FF0000')
-        .setTitle('🔴 Servidor Offline')
-        .setDescription('Não foi possível conectar a **' + CONFIG.MC_HOST + ':' + CONFIG.MC_PORT + '**.')
-        .setTimestamp();
-      return interaction.editReply({ embeds: [offlineEmbed] });
-    }
-
-    const playerListFormatted = data.list.length > 0 
-      ? data.list.map(p => `• ${p}`).join('\n') 
-      : 'Nenhum jogador detectado (ou query desativada no servidor).';
-
-    const listFinal = playerListFormatted.length > 1024 
-      ? playerListFormatted.substring(0, 1020) + '...' 
-      : playerListFormatted;
+    const playerListFormatted = cachedPlayers.length > 0
+      ? cachedPlayers.map(p => `• ${p}`).join('\n')
+      : 'Nenhum nick detetado na tabela de jogadores de momento.';
 
     const embed = new EmbedBuilder()
       .setColor('#00FF00')
-      .setTitle('🟢 Status do Servidor Minecraft Bedrock')
+      .setTitle('🟢 Jogadores Online (Conexão Direta)')
       .addFields(
         { name: '🌐 Endereço', value: `\`${CONFIG.MC_HOST}:${CONFIG.MC_PORT}\``, inline: true },
-        { name: '👥 Jogadores Online', value: `**${data.playersOnline} / ${data.playersMax}**`, inline: true },
-        { name: '📜 Jogadores em jogo', value: listFinal }
+        { name: '👥 Total Detetado', value: `**${cachedPlayers.length}**`, inline: true },
+        { name: '📜 Lista de Nicks', value: playerListFormatted.substring(0, 1024) }
       )
-      .setFooter({ text: 'Dados obtidos via API Web (Bedrock)' })
+      .setFooter({ text: 'Obtido via Fake Client / RakNet' })
       .setTimestamp();
 
     await interaction.editReply({ embeds: [embed] });
