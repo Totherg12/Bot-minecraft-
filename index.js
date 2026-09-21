@@ -35,8 +35,9 @@ function connectBedrockClient() {
       port: CONFIG.MC_PORT,
       username: 'BotStatus',
       version: '1.26.51', // <--- Força a versão exata exigida pelo servidor[span_4](start_span)[span_4](end_span)
-      offline: false,
-      connectTimeout: 10000
+      offline: true,
+      connectTimeout: 15000
+      conLog: console.log
     });
 
     mcClient.on('join', () => {
