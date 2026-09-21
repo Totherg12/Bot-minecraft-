@@ -278,15 +278,12 @@ function conectarBedrock() {
      * Ele serve apenas para confirmar o formato do player_list.
      */
     mcClient.on('packet', (data) => {
-      if (data?.data?.name === 'player_list') {
-        console.log(
-          '📦 Pacote player_list recebido:',
-          JSON.stringify(data.data.params, null, 2)
-        );
+  if (data?.data?.name === 'player_list') {
+    console.log('📦 Pacote player_list recebido');
 
-        processarListaDeJogadores(data.data.params);
-      }
-    });
+    processarListaDeJogadores(data.data.params);
+  }
+});
   } catch (error) {
     tentandoConectar = false;
 
