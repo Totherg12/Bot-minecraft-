@@ -7,8 +7,8 @@
     "start": "node index.js"
   },
   "dependencies": {
-    "bedrock-protocol": "^3.59.0",
+    "bedrock-protocol": "github:PrismarineJS/bedrock-protocol",
     "discord.js": "^14.14.1",
     "express": "^4.19.2"
   }
-}
+} 
