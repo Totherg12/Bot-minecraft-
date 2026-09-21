@@ -42,16 +42,11 @@ const CONFIG = {
   MC_PORT: Number(process.env.MC_PORT || 37116),
   MC_USERNAME: process.env.MC_USERNAME || 'BotStatus',
 
-  // Seu fork experimental precisa aceitar esta versão.
   MC_VERSION: '1.26.51',
-
-  // No seu servidor, false foi necessário.
   MC_OFFLINE: false,
 
-  // Canal da mensagem única atualizada a cada 30 segundos.
+  // Opcional. Pode ser configurado pelos comandos.
   ONLINE_CHANNEL_ID: process.env.ONLINE_CHANNEL_ID || null,
-
-  // Canal dos registros acumulativos a cada 45 segundos.
   REGISTRATION_CHANNEL_ID:
     process.env.REGISTRATION_CHANNEL_ID || null
 };
@@ -67,7 +62,7 @@ if (!CONFIG.CLIENT_ID) {
 }
 
 // ============================================================
-// CLIENTE DO DISCORD
+// CLIENTE DISCORD
 // ============================================================
 
 const discordClient = new Client({
@@ -84,19 +79,29 @@ let mcClient = null;
 let reconnectTimer = null;
 let tentandoConectar = false;
 
-// Mensagem única do status /configurar-online.
+// Mensagem única de status, atualizada a cada 30 segundos.
 let canalAtualizacaoId = CONFIG.ONLINE_CHANNEL_ID;
 let mensagemAtualizacaoId = null;
 let intervaloAtualizacao = null;
 let atualizandoMensagem = false;
 
-// Registros acumulativos /configurar-registro.
+// Registros acumulativos, enviados a cada 45 segundos.
 let canalRegistroId = CONFIG.REGISTRATION_CHANNEL_ID;
 let intervaloRegistro = null;
 let registrandoJogadores = false;
 
 // ============================================================
-// FUNÇÕES DOS JOGADORES
+// PERMISSÕES
+// ============================================================
+
+function eAdministrador(interaction) {
+  return interaction.memberPermissions?.has(
+    PermissionFlagsBits.Administrator
+  );
+}
+
+// ============================================================
+// JOGADORES ONLINE
 // ============================================================
 
 function obterIdJogador(jogador) {
@@ -139,20 +144,19 @@ function processarListaDeJogadores(packet) {
 
   const registros = Array.isArray(recordsContainer.records)
     ? recordsContainer.records
-    : Array.isArray(packet.records)
-      ? packet.records
-      : [];
+    : [];
 
   if (registros.length === 0) {
     return;
   }
 
-  const tipo = recordsContainer.type ?? packet.type ?? 'add';
+  const tipo = recordsContainer.type;
 
+  // 0/add = adiciona; 1/remove = remove.
   const removendo =
+    tipo === 1 ||
     tipo === 'remove' ||
-    tipo === 'REMOVE' ||
-    tipo === 1;
+    tipo === 'REMOVE';
 
   for (const jogador of registros) {
     const id = obterIdJogador(jogador);
@@ -171,14 +175,19 @@ function processarListaDeJogadores(packet) {
     }
   }
 
+  const nomes = obterNomesJogadores();
+
   console.log(
-    `👥 Jogadores detectados (${jogadoresOnline.size}):`,
-    obterNomesJogadores().join(', ') || 'nenhum'
+    `👥 Lista atualizada (${nomes.length} jogadores):`,
+    nomes.join(', ') || 'nenhum'
   );
+
+  // Atualiza imediatamente quando alguém entra ou sai.
+  atualizarMensagemOnline();
 }
 
 // ============================================================
-// EMBED DA MENSAGEM ONLINE
+// EMBED DO STATUS ONLINE
 // ============================================================
 
 function criarEmbedOnline() {
@@ -217,13 +226,13 @@ function criarEmbedOnline() {
       }
     )
     .setFooter({
-      text: 'Mensagem atualizada automaticamente a cada 30 segundos'
+      text: 'Atualizado automaticamente a cada 30 segundos'
     })
     .setTimestamp();
 }
 
 // ============================================================
-// EMBED DOS REGISTROS ACUMULATIVOS
+// EMBED DOS REGISTROS
 // ============================================================
 
 function criarEmbedRegistro() {
@@ -268,13 +277,13 @@ function criarEmbedRegistro() {
       }
     )
     .setFooter({
-      text: 'Registro acumulativo automático a cada 45 segundos'
+      text: 'Registro acumulativo a cada 45 segundos'
     })
     .setTimestamp();
 }
 
 // ============================================================
-// MENSAGEM ÚNICA ATUALIZADA A CADA 30 SEGUNDOS
+// STATUS AUTOMÁTICO — A CADA 30 SEGUNDOS
 // ============================================================
 
 async function atualizarMensagemOnline() {
@@ -285,10 +294,12 @@ async function atualizarMensagemOnline() {
   atualizandoMensagem = true;
 
   try {
-    const canal = await discordClient.channels.fetch(canalAtualizacaoId);
+    const canal = await discordClient.channels.fetch(
+      canalAtualizacaoId
+    );
 
     if (!canal || canal.type !== ChannelType.GuildText) {
-      console.error('❌ O canal de atualização não é válido.');
+      console.error('❌ Canal de status inválido.');
       return;
     }
 
@@ -297,7 +308,9 @@ async function atualizarMensagemOnline() {
 
     if (mensagemAtualizacaoId) {
       try {
-        mensagem = await canal.messages.fetch(mensagemAtualizacaoId);
+        mensagem = await canal.messages.fetch(
+          mensagemAtualizacaoId
+        );
       } catch {
         mensagem = null;
       }
@@ -308,7 +321,7 @@ async function atualizarMensagemOnline() {
         embeds: [embed]
       });
 
-      console.log('🔄 Mensagem online atualizada.');
+      console.log('🔄 Status online atualizado.');
     } else {
       mensagem = await canal.send({
         embeds: [embed]
@@ -316,10 +329,10 @@ async function atualizarMensagemOnline() {
 
       mensagemAtualizacaoId = mensagem.id;
 
-      console.log('✅ Mensagem online criada.');
+      console.log('✅ Mensagem de status criada no canal.');
     }
   } catch (error) {
-    console.error('❌ Erro ao atualizar a mensagem online:');
+    console.error('❌ Erro ao atualizar status online:');
     console.error(error.message);
   } finally {
     atualizandoMensagem = false;
@@ -333,12 +346,14 @@ function iniciarAtualizacaoAutomatica() {
   }
 
   if (!canalAtualizacaoId) {
-    console.log('ℹ️ Canal de atualização não configurado.');
+    console.log('ℹ️ Canal de status não configurado.');
     return;
   }
 
+  // Envia imediatamente ao escolher o canal.
   atualizarMensagemOnline();
 
+  // Depois atualiza a cada 30 segundos.
   intervaloAtualizacao = setInterval(() => {
     atualizarMensagemOnline();
   }, 30000);
@@ -359,7 +374,7 @@ function pararAtualizacaoAutomatica() {
 }
 
 // ============================================================
-// REGISTROS ACUMULATIVOS A CADA 45 SEGUNDOS
+// REGISTROS ACUMULATIVOS — A CADA 45 SEGUNDOS
 // ============================================================
 
 async function registrarJogadoresOnline() {
@@ -370,26 +385,24 @@ async function registrarJogadoresOnline() {
   registrandoJogadores = true;
 
   try {
-    const canal = await discordClient.channels.fetch(canalRegistroId);
+    const canal = await discordClient.channels.fetch(
+      canalRegistroId
+    );
 
     if (!canal || canal.type !== ChannelType.GuildText) {
-      console.error('❌ O canal de registro não é válido.');
+      console.error('❌ Canal de registro inválido.');
       return;
     }
 
-    /*
-     * IMPORTANTE:
-     * canal.send() cria uma mensagem nova.
-     * Não usamos message.edit() aqui.
-     * Portanto, os registros ficam acumulados.
-     */
+    // Sempre cria uma mensagem nova.
+    // Registros anteriores não são editados nem apagados.
     await canal.send({
       embeds: [criarEmbedRegistro()]
     });
 
     console.log('📝 Novo registro acumulativo enviado.');
   } catch (error) {
-    console.error('❌ Erro ao enviar registro acumulativo:');
+    console.error('❌ Erro ao enviar registro:');
     console.error(error.message);
   } finally {
     registrandoJogadores = false;
@@ -407,15 +420,15 @@ function iniciarRegistroAutomatico() {
     return;
   }
 
-  // Envia um registro imediatamente.
+  // Primeiro registro imediatamente.
   registrarJogadoresOnline();
 
-  // Depois envia uma nova mensagem a cada 45 segundos.
+  // Novo registro a cada 45 segundos.
   intervaloRegistro = setInterval(() => {
     registrarJogadoresOnline();
   }, 45000);
 
-  console.log('📝 Registro acumulativo iniciado a cada 45 segundos.');
+  console.log('📝 Registro automático iniciado a cada 45 segundos.');
 }
 
 function pararRegistroAutomatico() {
@@ -426,11 +439,11 @@ function pararRegistroAutomatico() {
 
   canalRegistroId = null;
 
-  console.log('⏹️ Registro acumulativo parado.');
+  console.log('⏹️ Registro automático parado.');
 }
 
 // ============================================================
-// CONEXÃO COM O SERVIDOR BEDROCK
+// CONEXÃO COM O MINECRAFT BEDROCK
 // ============================================================
 
 function agendarReconexao() {
@@ -464,18 +477,8 @@ function conectarBedrock() {
       host: CONFIG.MC_HOST,
       port: CONFIG.MC_PORT,
       username: CONFIG.MC_USERNAME,
-
-      /*
-       * Seu fork experimental utiliza:
-       * - nome da versão: 1.26.51;
-       * - dados internos: 1.26.45;
-       * - protocolo enviado: 2193.
-       */
       version: CONFIG.MC_VERSION,
-
-      // Seu servidor precisa de autenticação Microsoft.
       offline: CONFIG.MC_OFFLINE,
-
       connectTimeout: 15000,
       conLog: console.log,
 
@@ -500,7 +503,6 @@ function conectarBedrock() {
       console.log('✅ Bot apareceu no mundo!');
     });
 
-    // Atualiza a lista de jogadores.
     mcClient.on('player_list', (packet) => {
       processarListaDeJogadores(packet);
     });
@@ -532,7 +534,7 @@ function conectarBedrock() {
   } catch (error) {
     tentandoConectar = false;
 
-    console.error('❌ Erro ao criar o cliente Bedrock:');
+    console.error('❌ Erro ao criar cliente Bedrock:');
     console.error(error);
 
     agendarReconexao();
@@ -546,11 +548,14 @@ function conectarBedrock() {
 const commands = [
   new SlashCommandBuilder()
     .setName('online')
-    .setDescription('Mostra os jogadores online no Minecraft'),
+    .setDescription('Mostra os jogadores online')
+    .setDefaultMemberPermissions(
+      PermissionFlagsBits.Administrator.toString()
+    ),
 
   new SlashCommandBuilder()
     .setName('configurar-online')
-    .setDescription('Escolhe o canal do status atualizado a cada 30 segundos')
+    .setDescription('Escolhe o canal do status automático')
     .addChannelOption(option =>
       option
         .setName('canal')
@@ -603,9 +608,9 @@ async function registrarComandos() {
       }
     );
 
-    console.log('✅ Comandos do Discord registrados.');
+    console.log('✅ Comandos registrados no Discord.');
   } catch (error) {
-    console.error('❌ Erro ao registrar os comandos:');
+    console.error('❌ Erro ao registrar comandos:');
     console.error(error);
   }
 }
@@ -635,9 +640,19 @@ discordClient.on(Events.InteractionCreate, async (interaction) => {
     return;
   }
 
-  // ==========================================================
+  // Bloqueio geral: nenhum comando funciona para não administradores.
+  if (!eAdministrador(interaction)) {
+    await interaction.reply({
+      content: '❌ Apenas administradores podem usar os comandos deste bot.',
+      ephemeral: true
+    });
+
+    return;
+  }
+
+  // ----------------------------------------------------------
   // /online
-  // ==========================================================
+  // ----------------------------------------------------------
 
   if (interaction.commandName === 'online') {
     await interaction.reply({
@@ -647,25 +662,11 @@ discordClient.on(Events.InteractionCreate, async (interaction) => {
     return;
   }
 
-  // ==========================================================
+  // ----------------------------------------------------------
   // /configurar-online
-  // ==========================================================
+  // ----------------------------------------------------------
 
   if (interaction.commandName === 'configurar-online') {
-    const podeConfigurar =
-      interaction.memberPermissions?.has(
-        PermissionFlagsBits.Administrator
-      );
-
-    if (!podeConfigurar) {
-      await interaction.reply({
-        content: '❌ Apenas administradores podem escolher esse canal.',
-        ephemeral: true
-      });
-
-      return;
-    }
-
     const canal = interaction.options.getChannel('canal');
 
     if (!canal || canal.type !== ChannelType.GuildText) {
@@ -678,38 +679,28 @@ discordClient.on(Events.InteractionCreate, async (interaction) => {
     }
 
     canalAtualizacaoId = canal.id;
+
+    // Cria uma nova mensagem no canal escolhido.
     mensagemAtualizacaoId = null;
 
+    // Envia imediatamente e inicia o intervalo de 30 segundos.
     iniciarAtualizacaoAutomatica();
 
     await interaction.reply({
       content:
-        `✅ O status será atualizado a cada 30 segundos em ${canal}.`,
+        `✅ Canal de status definido como ${canal}.\n` +
+        'A mensagem já foi enviada e será atualizada a cada 30 segundos.',
       ephemeral: true
     });
 
     return;
   }
 
-  // ==========================================================
+  // ----------------------------------------------------------
   // /parar-online
-  // ==========================================================
+  // ----------------------------------------------------------
 
   if (interaction.commandName === 'parar-online') {
-    const podeConfigurar =
-      interaction.memberPermissions?.has(
-        PermissionFlagsBits.Administrator
-      );
-
-    if (!podeConfigurar) {
-      await interaction.reply({
-        content: '❌ Apenas administradores podem parar esse status.',
-        ephemeral: true
-      });
-
-      return;
-    }
-
     pararAtualizacaoAutomatica();
 
     await interaction.reply({
@@ -720,26 +711,11 @@ discordClient.on(Events.InteractionCreate, async (interaction) => {
     return;
   }
 
-  // ==========================================================
+  // ----------------------------------------------------------
   // /configurar-registro
-  // ==========================================================
+  // ----------------------------------------------------------
 
   if (interaction.commandName === 'configurar-registro') {
-    const eAdministrador =
-      interaction.memberPermissions?.has(
-        PermissionFlagsBits.Administrator
-      );
-
-    if (!eAdministrador) {
-      await interaction.reply({
-        content:
-          '❌ Apenas administradores podem escolher o canal de registro.',
-        ephemeral: true
-      });
-
-      return;
-    }
-
     const canal = interaction.options.getChannel('canal');
 
     if (!canal || canal.type !== ChannelType.GuildText) {
@@ -758,37 +734,22 @@ discordClient.on(Events.InteractionCreate, async (interaction) => {
     await interaction.reply({
       content:
         `✅ Canal de registro definido como ${canal}.\n` +
-        'Um novo registro será enviado a cada 45 segundos.',
+        'Uma nova mensagem será enviada a cada 45 segundos.',
       ephemeral: true
     });
 
     return;
   }
 
-  // ==========================================================
+  // ----------------------------------------------------------
   // /parar-registro
-  // ==========================================================
+  // ----------------------------------------------------------
 
   if (interaction.commandName === 'parar-registro') {
-    const eAdministrador =
-      interaction.memberPermissions?.has(
-        PermissionFlagsBits.Administrator
-      );
-
-    if (!eAdministrador) {
-      await interaction.reply({
-        content:
-          '❌ Apenas administradores podem parar os registros.',
-        ephemeral: true
-      });
-
-      return;
-    }
-
     pararRegistroAutomatico();
 
     await interaction.reply({
-      content: '✅ Os registros acumulativos foram parados.',
+      content: '✅ Os registros automáticos foram parados.',
       ephemeral: true
     });
   }
