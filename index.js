@@ -58,7 +58,7 @@ let mcClient = null;
 let connecting = false;
 let reconnectTimer = null;
 let shuttingDown = false;
-let listInterval = null;
+let heartbeatInterval = null;
 
 let onlineChannelId = CONFIG.ONLINE_CHANNEL_ID;
 let onlineMessageId = null;
@@ -104,96 +104,75 @@ function playerNames() {
     .sort((a, b) => a.localeCompare(b, 'pt-BR'));
 }
 
-// Remove códigos de cores/formatação do Minecraft (ex: §a, §f, §r)
-function cleanFormatting(str) {
-  return str.replace(/§[0-9a-fk-or]/gi, '').trim();
+function playerId(player) {
+  const value = player?.uuid ?? player?.xuid ??
+    player?.entity_unique_id ?? player?.entity_runtime_id ??
+    player?.username ?? player?.name ?? player?.gamertag;
+  return value == null ? null : String(value);
 }
 
-// Processa o retorno em texto do comando /list
-function parseListResponse(packet) {
-  let text = '';
+function playerName(player) {
+  const value = player?.username ?? player?.name ??
+    player?.gamertag ?? player?.display_name ??
+    player?.skin_data?.display_name ?? player?.player_name;
+  return value ? String(value) : null;
+}
 
-  if (packet.parameters && Array.isArray(packet.parameters)) {
-    text = packet.parameters.map(p => cleanFormatting(String(p))).join(' ');
-  } else if (packet.message) {
-    text = cleanFormatting(packet.message);
+function packetRecords(packet) {
+  if (Array.isArray(packet?.records?.records)) return packet.records.records;
+  if (Array.isArray(packet?.records)) return packet.records;
+  if (Array.isArray(packet?.entries)) return packet.entries;
+  return [];
+}
+
+function isRemovePacket(packet) {
+  const type = packet?.records?.type ?? packet?.type ?? packet?.action;
+  return type === 1 || type === 'remove' || type === 'REMOVE' || type === 'Remove';
+}
+
+function processPlayerList(packet) {
+  const records = packetRecords(packet);
+  if (!records.length) {
+    console.log('📦 player_list sem registros.');
+    return;
   }
 
-  if (!text) return;
+  const removing = isRemovePacket(packet);
 
-  // Filtra apenas mensagens relacionadas à contagem/lista de jogadores
-  const isListResponse = /online|jogadores|players|há|there are/i.test(text);
-  if (!isListResponse) return;
+  for (const player of records) {
+    const id = playerId(player);
+    const name = playerName(player);
 
-  const parts = text.split(':');
-  if (parts.length > 1) {
-    const namesText = parts.slice(1).join(':').trim();
-    if (namesText) {
-      const rawNames = namesText.split(',').map(n => n.trim()).filter(Boolean);
-      jogadoresOnline.clear();
-      for (const name of rawNames) {
-        const cleanName = name.replace(/^•\s*/, '').trim();
-        if (cleanName && cleanName.toLowerCase() !== 'nenhum') {
-          jogadoresOnline.set(cleanName, cleanName);
+    if (removing) {
+      if (id) jogadoresOnline.delete(id);
+      if (name) {
+        for (const [key, savedName] of jogadoresOnline) {
+          if (savedName === name) jogadoresOnline.delete(key);
         }
       }
-    } else {
-      jogadoresOnline.clear();
+    } else if (id && name) {
+      jogadoresOnline.set(id, name);
     }
-  } else if (/0\s*online|0\s*jogadores|nenhum|no players/i.test(text)) {
-    jogadoresOnline.clear();
   }
-}
 
-// ============================================================
-// COMANDO /LIST A CADA 2 SEGUNDOS
-// ============================================================
-
-function startListInterval() {
-  if (listInterval) clearInterval(listInterval);
-
-  listInterval = setInterval(() => {
-    if (mcClient) {
-      try {
-        mcClient.queue('command_request', {
-          command: '/list',
-          origin: {
-            type: 'player',
-            uuid: mcClient.uuid || '',
-            request_id: ''
-          },
-          internal: false
-        });
-      } catch (err) {
-        // Ignora erros pontuais de envio na fila
-      }
-    }
-  }, 2000);
-
-  console.log('⏱️ Envio do /list a cada 2 segundos iniciado.');
-}
-
-function stopListInterval() {
-  if (listInterval) clearInterval(listInterval);
-  listInterval = null;
+  console.log(`👥 Lista: ${playerNames().length} jogador(es)`, playerNames());
+  updateOnlineMessage();
 }
 
 // ============================================================
 // EMBEDS
 // ============================================================
 
-function onlineEmbed(realOnlineCount) {
+function onlineEmbed() {
   const names = playerNames();
   let list = names.length ? names.map(name => `• ${name}`).join('\n') : 'Nenhum jogador online.';
   if (list.length > 1024) list = `${list.slice(0, 1000)}\n...`;
-
-  const totalDisplay = realOnlineCount !== undefined ? String(realOnlineCount) : String(names.length);
 
   return new EmbedBuilder()
     .setColor('#00FF00')
     .setTitle('🟢 Jogadores online')
     .addFields(
-      { name: '👥 Total', value: totalDisplay, inline: true },
+      { name: '👥 Total', value: String(names.length), inline: true },
       { name: '🌐 Servidor', value: `\`${CONFIG.MC_HOST}:${CONFIG.MC_PORT}\``, inline: true },
       { name: '🎮 Versão', value: `\`${CONFIG.MC_VERSION}\``, inline: true },
       { name: '📜 Nicks', value: list }
@@ -243,21 +222,14 @@ async function updateOnlineMessage() {
       try { message = await channel.messages.fetch(onlineMessageId); } catch { message = null; }
     }
 
-    if (!message) {
-      const recentMessages = await channel.messages.fetch({ limit: 10 });
-      message = recentMessages.find(m => m.author.id === discordClient.user.id);
-      if (message) onlineMessageId = message.id;
-    }
-
-    const embed = onlineEmbed(jogadoresOnline.size);
     if (message) {
-      await message.edit({ embeds: [embed] });
+      await message.edit({ embeds: [onlineEmbed()] });
     } else {
-      message = await channel.send({ embeds: [embed] });
+      message = await channel.send({ embeds: [onlineEmbed()] });
       onlineMessageId = message.id;
     }
 
-    console.log(`🔄 Status atualizado no Discord (${jogadoresOnline.size} jogadores).`);
+    console.log(`🔄 Status atualizado com ${playerNames().length} jogador(es).`);
   } catch (error) {
     console.error('❌ Erro ao atualizar status:', error.message);
   } finally {
@@ -316,7 +288,7 @@ function stopRegistration() {
 }
 
 // ============================================================
-// BEDROCK: RECONEXÃO E EVENTOS
+// BEDROCK: RECONEXÃO
 // ============================================================
 
 function scheduleReconnect() {
@@ -362,14 +334,11 @@ function connectBedrock() {
     client.on('spawn', () => {
       connecting = false;
       console.log('✅ Bot apareceu no mundo.');
-      startListInterval();
     });
-
-    // Intercepta as respostas de texto do servidor (incluindo o /list)
-    client.on('text', packet => {
-      parseListResponse(packet);
+    client.on('player_list', packet => {
+      console.log('📋 player_list recebido.');
+      processPlayerList(packet);
     });
-
     client.on('kick', packet => console.error('🚫 Bot expulso:', safeStringify(packet)));
     client.on('disconnect', packet => console.error('🚫 Desconexão enviada pelo servidor:', safeStringify(packet)));
 
@@ -379,12 +348,12 @@ function connectBedrock() {
         return;
       }
       console.error('⚠️ Erro Bedrock:', error);
+      // O evento close controla a reconexão; não abrimos outra conexão aqui.
     });
 
     client.on('close', reason => {
       console.error('🔌 Conexão Bedrock fechada:', safeStringify(reason));
       connecting = false;
-      stopListInterval();
       if (mcClient === client) {
         mcClient = null;
         clearPlayers();
@@ -394,14 +363,13 @@ function connectBedrock() {
   } catch (error) {
     connecting = false;
     mcClient = null;
-    stopListInterval();
     console.error('❌ Falha ao criar cliente Bedrock:', error);
     scheduleReconnect();
   }
 }
 
 // ============================================================
-// COMANDOS DISCORD
+// COMANDOS
 // ============================================================
 
 const commands = [
@@ -446,7 +414,7 @@ discordClient.on(Events.InteractionCreate, async interaction => {
   }
 
   if (interaction.commandName === 'online') {
-    await interaction.reply({ embeds: [onlineEmbed(jogadoresOnline.size)] });
+    await interaction.reply({ embeds: [onlineEmbed()] });
     return;
   }
 
@@ -487,14 +455,77 @@ discordClient.on(Events.InteractionCreate, async interaction => {
 
 discordClient.on(Events.Error, error => console.error('❌ Erro Discord:', error));
 
+// ============================================================
+// SINAL DE VIDA E ENCERRAMENTO SEGURO
+// ============================================================
+
+function startHeartbeat() {
+  if (heartbeatInterval) {
+    clearInterval(heartbeatInterval);
+  }
+
+  heartbeatInterval = setInterval(() => {
+    console.log(
+      `💓 Bot ativo | Discord: ${discordClient.isReady() ? 'online' : 'offline'} | ` +
+      `Minecraft: ${mcClient ? 'conectado' : 'desconectado'} | ` +
+      `Jogadores: ${playerNames().length}`
+    );
+  }, 30000);
+}
+
+async function shutdown(reason, exitCode = 0) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+
+  console.log(`🛑 Encerrando o processo: ${reason}`);
+
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+
+  if (onlineInterval) clearInterval(onlineInterval);
+  if (registrationInterval) clearInterval(registrationInterval);
+  if (heartbeatInterval) clearInterval(heartbeatInterval);
+
+  try {
+    mcClient?.close();
+  } catch (error) {
+    console.error('⚠️ Erro ao fechar Minecraft:', error);
+  }
+
+  try {
+    discordClient.destroy();
+  } catch (error) {
+    console.error('⚠️ Erro ao fechar Discord:', error);
+  }
+
+  process.exit(exitCode);
+}
+
+startHeartbeat();
+
 discordClient.login(CONFIG.DISCORD_TOKEN).catch(error => {
   console.error('❌ Falha no login do Discord:', error);
+  shutdown('falha no login do Discord', 1);
 });
 
 process.on('uncaughtException', error => {
-  console.error('❌ Erro não tratado:', error);
+  console.error('❌ Erro fatal não tratado:');
+  console.error(error);
+  shutdown('uncaughtException', 1);
 });
 
 process.on('unhandledRejection', error => {
-  console.error('❌ Promise rejeitada:', error);
+  console.error('❌ Promise rejeitada sem tratamento:');
+  console.error(error);
+  shutdown('unhandledRejection', 1);
+});
+
+process.on('SIGTERM', () => {
+  shutdown('SIGTERM recebido pelo Render', 0);
+});
+
+process.on('SIGINT', () => {
+  shutdown('SIGINT recebido', 0);
 });
