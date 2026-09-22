@@ -42,23 +42,28 @@ const CONFIG = {
   MC_PORT: Number(process.env.MC_PORT || 37116),
   MC_USERNAME: process.env.MC_USERNAME || 'BotStatus',
 
+  // Seu fork experimental do bedrock-protocol.
   MC_VERSION: '1.26.51',
+
+  // O servidor exige autenticação Microsoft.
   MC_OFFLINE: false,
 
+  // Opcional: IDs salvos no Render.
   ONLINE_CHANNEL_ID: process.env.ONLINE_CHANNEL_ID || null,
   REGISTRATION_CHANNEL_ID:
     process.env.REGISTRATION_CHANNEL_ID || null
 };
 
+// Tempo entre tentativas de reconexão.
 const TEMPO_RECONEXAO = 10000;
 
 if (!CONFIG.DISCORD_TOKEN) {
-  console.error('❌ DISCORD_TOKEN não foi configurado.');
+  console.error('❌ A variável DISCORD_TOKEN não foi configurada.');
   process.exit(1);
 }
 
 if (!CONFIG.CLIENT_ID) {
-  console.error('❌ CLIENT_ID não foi configurado.');
+  console.error('❌ A variável CLIENT_ID não foi configurada.');
   process.exit(1);
 }
 
@@ -80,19 +85,19 @@ let mcClient = null;
 let tentandoConectar = false;
 let reconnectTimer = null;
 
-// Status atualizado a cada 30 segundos.
+// Status: uma mensagem editada a cada 30 segundos.
 let canalAtualizacaoId = CONFIG.ONLINE_CHANNEL_ID;
 let mensagemAtualizacaoId = null;
 let intervaloAtualizacao = null;
 let atualizandoMensagem = false;
 
-// Registros acumulativos a cada 45 segundos.
+// Registros: novas mensagens a cada 45 segundos.
 let canalRegistroId = CONFIG.REGISTRATION_CHANNEL_ID;
 let intervaloRegistro = null;
 let registrandoJogadores = false;
 
 // ============================================================
-// PERMISSÕES
+// FUNÇÕES GERAIS
 // ============================================================
 
 function eAdministrador(interaction) {
@@ -102,6 +107,7 @@ function eAdministrador(interaction) {
 }
 
 function respostaPrivada() {
+  // MessageFlags.Ephemeral
   return { flags: 64 };
 }
 
@@ -111,29 +117,35 @@ function respostaPrivada() {
 
 function obterIdJogador(jogador) {
   const id =
-    jogador.uuid ??
-    jogador.xuid ??
-    jogador.entity_unique_id ??
-    jogador.entity_runtime_id ??
-    jogador.username ??
-    jogador.name ??
-    jogador.gamertag;
+    jogador?.uuid ??
+    jogador?.xuid ??
+    jogador?.entity_unique_id ??
+    jogador?.entity_runtime_id ??
+    jogador?.username ??
+    jogador?.name ??
+    jogador?.gamertag;
 
-  return id === undefined || id === null
-    ? null
-    : String(id);
+  if (id === undefined || id === null) {
+    return null;
+  }
+
+  return String(id);
 }
 
 function obterNomeJogador(jogador) {
   const nome =
-    jogador.username ??
-    jogador.name ??
-    jogador.gamertag ??
-    jogador.display_name ??
-    jogador.skin_data?.display_name ??
-    jogador.player_name;
+    jogador?.username ??
+    jogador?.name ??
+    jogador?.gamertag ??
+    jogador?.display_name ??
+    jogador?.skin_data?.display_name ??
+    jogador?.player_name;
 
-  return nome ? String(nome) : null;
+  if (!nome) {
+    return null;
+  }
+
+  return String(nome);
 }
 
 function obterNomesJogadores() {
@@ -196,8 +208,22 @@ function processarListaDeJogadores(packet) {
     const nome = obterNomeJogador(jogador);
 
     if (removendo) {
+      /*
+       * Em alguns pacotes de remoção existe apenas o UUID/XUID.
+       */
       if (id) {
         jogadoresOnline.delete(id);
+      }
+
+      /*
+       * Fallback caso a remoção venha com nome, mas sem o mesmo ID.
+       */
+      if (nome) {
+        for (const [chave, nomeSalvo] of jogadoresOnline.entries()) {
+          if (nomeSalvo === nome) {
+            jogadoresOnline.delete(chave);
+          }
+        }
       }
 
       continue;
@@ -215,12 +241,14 @@ function processarListaDeJogadores(packet) {
     nomes.join(', ') || 'nenhum'
   );
 
-  // Atualiza imediatamente quando alguém entra ou sai.
+  /*
+   * Atualiza o status imediatamente quando alguém entra ou sai.
+   */
   atualizarMensagemOnline();
 }
 
 // ============================================================
-// EMBEDS
+// EMBED DO STATUS ONLINE
 // ============================================================
 
 function criarEmbedOnline() {
@@ -263,6 +291,10 @@ function criarEmbedOnline() {
     })
     .setTimestamp();
 }
+
+// ============================================================
+// EMBED DOS REGISTROS
+// ============================================================
 
 function criarEmbedRegistro() {
   const nomes = obterNomesJogadores();
@@ -312,7 +344,7 @@ function criarEmbedRegistro() {
 }
 
 // ============================================================
-// STATUS AUTOMÁTICO — 30 SEGUNDOS
+// STATUS AUTOMÁTICO — A CADA 30 SEGUNDOS
 // ============================================================
 
 async function atualizarMensagemOnline() {
@@ -328,7 +360,7 @@ async function atualizarMensagemOnline() {
     );
 
     if (!canal || canal.type !== ChannelType.GuildText) {
-      console.error('❌ Canal de status inválido.');
+      console.error('❌ O canal de status não é válido.');
       return;
     }
 
@@ -381,8 +413,10 @@ function iniciarAtualizacaoAutomatica() {
     return;
   }
 
+  // Envia imediatamente.
   atualizarMensagemOnline();
 
+  // Continua atualizando mesmo se o Minecraft estiver desconectado.
   intervaloAtualizacao = setInterval(() => {
     atualizarMensagemOnline();
   }, 30000);
@@ -403,7 +437,7 @@ function pararAtualizacaoAutomatica() {
 }
 
 // ============================================================
-// REGISTROS ACUMULATIVOS — 45 SEGUNDOS
+// REGISTROS ACUMULATIVOS — A CADA 45 SEGUNDOS
 // ============================================================
 
 async function registrarJogadoresOnline() {
@@ -419,11 +453,14 @@ async function registrarJogadoresOnline() {
     );
 
     if (!canal || canal.type !== ChannelType.GuildText) {
-      console.error('❌ Canal de registro inválido.');
+      console.error('❌ O canal de registro não é válido.');
       return;
     }
 
-    // Sempre cria uma nova mensagem.
+    /*
+     * Sempre envia uma nova mensagem.
+     * Os registros anteriores não são editados ou apagados.
+     */
     await canal.send({
       embeds: [criarEmbedRegistro()]
     });
@@ -448,8 +485,10 @@ function iniciarRegistroAutomatico() {
     return;
   }
 
+  // Primeiro registro imediatamente.
   registrarJogadoresOnline();
 
+  // Novo registro a cada 45 segundos.
   intervaloRegistro = setInterval(() => {
     registrarJogadoresOnline();
   }, 45000);
@@ -469,27 +508,33 @@ function pararRegistroAutomatico() {
 }
 
 // ============================================================
-// RECONEXÃO BEDROCK
+// RECONEXÃO DO MINECRAFT
 // ============================================================
 
 function agendarReconexao() {
-  // Impede várias tentativas simultâneas.
-  if (reconnectTimer || tentandoConectar) {
+  /*
+   * Impede várias reconexões simultâneas.
+   */
+  if (reconnectTimer) {
+    console.log('ℹ️ Uma reconexão já está agendada.');
     return;
   }
 
   console.log(
-    `🔄 Tentando reconectar em ${TEMPO_RECONEXAO / 1000} segundos...`
+    `🔄 Nova tentativa em ${TEMPO_RECONEXAO / 1000} segundos...`
   );
 
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
+
+    console.log('🔁 Iniciando nova conexão Bedrock...');
     conectarBedrock();
   }, TEMPO_RECONEXAO);
 }
 
 function conectarBedrock() {
   if (tentandoConectar) {
+    console.log('ℹ️ Já existe uma tentativa de conexão em andamento.');
     return;
   }
 
@@ -500,8 +545,10 @@ function conectarBedrock() {
   console.log(`🎮 Versão: ${CONFIG.MC_VERSION}`);
   console.log(`🔐 Autenticação online: ${!CONFIG.MC_OFFLINE}`);
 
+  let clienteAtual;
+
   try {
-    mcClient = bedrock.createClient({
+    clienteAtual = bedrock.createClient({
       host: CONFIG.MC_HOST,
       port: CONFIG.MC_PORT,
       username: CONFIG.MC_USERNAME,
@@ -517,40 +564,51 @@ function conectarBedrock() {
       }
     });
 
-    mcClient.on('connect_allowed', () => {
+    mcClient = clienteAtual;
+
+    clienteAtual.on('connect_allowed', () => {
       console.log('✅ Conexão RakNet permitida.');
     });
 
-    mcClient.on('join', () => {
+    clienteAtual.on('join', () => {
       tentandoConectar = false;
       console.log('✅ Bot entrou no servidor Bedrock!');
     });
 
-    mcClient.on('spawn', () => {
+    clienteAtual.on('spawn', () => {
       tentandoConectar = false;
       console.log('✅ Bot apareceu no mundo!');
     });
 
-    mcClient.on('player_list', (packet) => {
+    clienteAtual.on('player_list', (packet) => {
       console.log('📋 Pacote player_list recebido.');
       processarListaDeJogadores(packet);
     });
 
-    mcClient.on('kick', (packet) => {
+    clienteAtual.on('kick', (packet) => {
       console.error('🚫 O servidor expulsou o bot:');
       console.error(packet);
+
+      /*
+       * Normalmente o evento close virá depois.
+       * A reconexão fica centralizada no close.
+       */
     });
 
-    mcClient.on('disconnect', (packet) => {
+    clienteAtual.on('disconnect', (packet) => {
       console.error('🚫 O servidor enviou uma desconexão:');
       console.error(packet);
+
+      /*
+       * Não limpamos os jogadores aqui.
+       * Só limpamos quando a conexão realmente fecha.
+       */
     });
 
-    mcClient.on('error', (error) => {
+    clienteAtual.on('error', (error) => {
       /*
-       * Esse erro já ocorreu por causa do pacote camera_presets
-       * na compatibilidade experimental. Ele não deve derrubar
-       * o processo do bot.
+       * Esse erro apareceu anteriormente por causa de pacotes
+       * da 1.26.51 sendo interpretados com dados da 1.26.45.
        */
       if (error?.partialReadError) {
         console.warn(
@@ -567,29 +625,34 @@ function conectarBedrock() {
       console.error(error);
 
       /*
-       * Não agendamos outra tentativa aqui.
-       * Se a conexão for fechada, o evento "close" fará isso.
+       * Fecha somente esta conexão.
+       * O evento close cuidará da reconexão.
        */
       try {
-        mcClient?.close();
+        clienteAtual.close();
       } catch (closeError) {
-        console.error('Erro ao fechar conexão:', closeError);
+        console.error('❌ Erro ao fechar conexão com problema:');
+        console.error(closeError);
       }
     });
 
     /*
-     * Este é o ponto principal da reconexão.
-     * Qualquer fechamento real da conexão passa por aqui.
+     * Toda reconexão é controlada por este evento.
      */
-    mcClient.on('close', () => {
+    clienteAtual.on('close', () => {
       console.log('🔌 Bot desconectado do servidor Bedrock.');
 
       tentandoConectar = false;
-      mcClient = null;
 
-      limparJogadores();
+      /*
+       * Só alteramos mcClient se ele ainda for esta conexão.
+       * Isso evita que uma conexão antiga apague uma nova.
+       */
+      if (mcClient === clienteAtual) {
+        mcClient = null;
+        limparJogadores();
+      }
 
-      // A lista do Discord ficará vazia até a reconexão.
       agendarReconexao();
     });
   } catch (error) {
@@ -638,7 +701,7 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName('configurar-registro')
-    .setDescription('Escolhe o canal dos registros')
+    .setDescription('Escolhe o canal dos registros acumulativos')
     .addChannelOption(option =>
       option
         .setName('canal')
@@ -652,7 +715,7 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName('parar-registro')
-    .setDescription('Para os registros automáticos')
+    .setDescription('Para os registros acumulativos')
     .setDefaultMemberPermissions(
       PermissionFlagsBits.Administrator.toString()
     )
@@ -678,7 +741,7 @@ async function registrarComandos() {
 }
 
 // ============================================================
-// INTERAÇÕES DO DISCORD
+// EVENTOS DO DISCORD
 // ============================================================
 
 discordClient.once(Events.ClientReady, async (client) => {
@@ -702,6 +765,9 @@ discordClient.on(Events.InteractionCreate, async (interaction) => {
     return;
   }
 
+  /*
+   * Todos os comandos são somente para administradores.
+   */
   if (!eAdministrador(interaction)) {
     await interaction.reply({
       content: '❌ Apenas administradores podem usar os comandos deste bot.',
@@ -734,6 +800,9 @@ discordClient.on(Events.InteractionCreate, async (interaction) => {
     canalAtualizacaoId = canal.id;
     mensagemAtualizacaoId = null;
 
+    /*
+     * Envia imediatamente no novo canal.
+     */
     iniciarAtualizacaoAutomatica();
 
     await interaction.reply({
@@ -795,6 +864,25 @@ discordClient.on(Events.InteractionCreate, async (interaction) => {
 
 discordClient.on(Events.Error, (error) => {
   console.error('❌ Erro no cliente do Discord:');
+  console.error(error);
+});
+
+// ============================================================
+// ERROS GERAIS DO PROCESSO
+// ============================================================
+
+process.on('uncaughtException', (error) => {
+  console.error('❌ Erro não tratado no processo:');
+  console.error(error);
+
+  /*
+   * Não encerramos o processo automaticamente.
+   * Isso mantém o servidor HTTP e o Discord ativos.
+   */
+});
+
+process.on('unhandledRejection', (error) => {
+  console.error('❌ Promise rejeitada sem tratamento:');
   console.error(error);
 });
 
