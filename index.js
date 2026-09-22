@@ -58,6 +58,7 @@ let mcClient = null;
 let connecting = false;
 let reconnectTimer = null;
 let shuttingDown = false;
+let listInterval = null;
 
 let onlineChannelId = CONFIG.ONLINE_CHANNEL_ID;
 let onlineMessageId = null;
@@ -103,71 +104,78 @@ function playerNames() {
     .sort((a, b) => a.localeCompare(b, 'pt-BR'));
 }
 
-function playerId(player) {
-  const value = player?.uuid ?? player?.xuid ??
-    player?.entity_unique_id ?? player?.entity_runtime_id ??
-    player?.username ?? player?.name ?? player?.gamertag;
-  return value == null ? null : String(value);
+// Remove códigos de cores/formatação do Minecraft (ex: §a, §f, §r)
+function cleanFormatting(str) {
+  return str.replace(/§[0-9a-fk-or]/gi, '').trim();
 }
 
-function playerName(player) {
-  const value = player?.username ?? player?.name ??
-    player?.gamertag ?? player?.display_name ??
-    player?.skin_data?.display_name ?? player?.player_name;
-  return value ? String(value) : null;
-}
+// Processa o retorno em texto do comando /list
+function parseListResponse(packet) {
+  let text = '';
 
-function packetRecords(packet) {
-  if (Array.isArray(packet?.records?.records)) return packet.records.records;
-  if (Array.isArray(packet?.records)) return packet.records;
-  if (Array.isArray(packet?.entries)) return packet.entries;
-  return [];
-}
+  if (packet.parameters && Array.isArray(packet.parameters)) {
+    text = packet.parameters.map(p => cleanFormatting(String(p))).join(' ');
+  } else if (packet.message) {
+    text = cleanFormatting(packet.message);
+  }
 
-function isRemovePacket(packet) {
-  const type = packet?.records?.type ?? packet?.type ?? packet?.action;
-  return type === 1 || type === 'remove' || type === 'REMOVE' || type === 'Remove';
-}
+  if (!text) return;
 
-function processPlayerList(packet) {
-  const records = packetRecords(packet);
-  if (!records.length) return;
+  // Filtra apenas mensagens relacionadas à contagem/lista de jogadores
+  const isListResponse = /online|jogadores|players|há|there are/i.test(text);
+  if (!isListResponse) return;
 
-  const removing = isRemovePacket(packet);
-
-  for (const player of records) {
-    const id = playerId(player);
-    const name = playerName(player);
-
-    if (removing) {
-      if (id) jogadoresOnline.delete(id);
-      if (name) {
-        for (const [key, savedName] of jogadoresOnline) {
-          if (savedName === name) jogadoresOnline.delete(key);
+  const parts = text.split(':');
+  if (parts.length > 1) {
+    const namesText = parts.slice(1).join(':').trim();
+    if (namesText) {
+      const rawNames = namesText.split(',').map(n => n.trim()).filter(Boolean);
+      jogadoresOnline.clear();
+      for (const name of rawNames) {
+        const cleanName = name.replace(/^•\s*/, '').trim();
+        if (cleanName && cleanName.toLowerCase() !== 'nenhum') {
+          jogadoresOnline.set(cleanName, cleanName);
         }
       }
-    } else if (id && name) {
-      jogadoresOnline.set(id, name);
+    } else {
+      jogadoresOnline.clear();
     }
+  } else if (/0\s*online|0\s*jogadores|nenhum|no players/i.test(text)) {
+    jogadoresOnline.clear();
   }
 }
 
-// Envia o comando /list no chat do Minecraft
-function requestPlayerListViaChat() {
-  if (mcClient && !connecting) {
-    try {
-      mcClient.queue('text', {
-        type: 'chat',
-        needs_translation: false,
-        source_name: CONFIG.MC_USERNAME,
-        xuid: '',
-        platform_chat_id: '',
-        message: '/list'
-      });
-    } catch (error) {
-      console.warn('⚠️ Falha ao solicitar /list no chat:', error.message);
+// ============================================================
+// COMANDO /LIST A CADA 2 SEGUNDOS
+// ============================================================
+
+function startListInterval() {
+  if (listInterval) clearInterval(listInterval);
+
+  listInterval = setInterval(() => {
+    if (mcClient) {
+      try {
+        mcClient.queue('command_request', {
+          command: '/list',
+          origin: {
+            type: 'player',
+            uuid: mcClient.uuid || '',
+            request_id: ''
+          },
+          internal: false
+        });
+      } catch (err) {
+        // Ignora erros pontuais de envio na fila
+      }
     }
-  }
+  }, 2000);
+
+  console.log('⏱️ Envio do /list a cada 2 segundos iniciado.');
+}
+
+function stopListInterval() {
+  if (listInterval) clearInterval(listInterval);
+  listInterval = null;
 }
 
 // ============================================================
@@ -224,31 +232,12 @@ async function updateOnlineMessage() {
   updatingOnlineMessage = true;
 
   try {
-    // 1. Pede a lista atualizada no chat do Minecraft
-    requestPlayerListViaChat();
-
     const channel = await discordClient.channels.fetch(onlineChannelId);
     if (!channel || channel.type !== ChannelType.GuildText) {
       console.error('❌ Canal de status inválido.');
       return;
     }
 
-    // 2. Obtém o número real via Ping UDP
-    let realOnlineCount = undefined;
-    try {
-      const pingResult = await bedrock.ping({ host: CONFIG.MC_HOST, port: CONFIG.MC_PORT });
-      if (pingResult && pingResult.playersOnline !== undefined) {
-        realOnlineCount = pingResult.playersOnline;
-      }
-    } catch (pingError) {
-      console.warn('⚠️ Não foi possível obter o ping direto.');
-    }
-
-    if (realOnlineCount === 0) {
-      clearPlayers();
-    }
-
-    // 3. Busca mensagem existente no chat do Discord
     let message = null;
     if (onlineMessageId) {
       try { message = await channel.messages.fetch(onlineMessageId); } catch { message = null; }
@@ -260,8 +249,7 @@ async function updateOnlineMessage() {
       if (message) onlineMessageId = message.id;
     }
 
-    // 4. Edita a mensagem fixada
-    const embed = onlineEmbed(realOnlineCount);
+    const embed = onlineEmbed(jogadoresOnline.size);
     if (message) {
       await message.edit({ embeds: [embed] });
     } else {
@@ -269,7 +257,7 @@ async function updateOnlineMessage() {
       onlineMessageId = message.id;
     }
 
-    console.log(`🔄 Status atualizado (${realOnlineCount ?? playerNames().length} jogadores).`);
+    console.log(`🔄 Status atualizado no Discord (${jogadoresOnline.size} jogadores).`);
   } catch (error) {
     console.error('❌ Erro ao atualizar status:', error.message);
   } finally {
@@ -328,7 +316,7 @@ function stopRegistration() {
 }
 
 // ============================================================
-// BEDROCK: CONEXÃO E CHAT PARSER
+// BEDROCK: RECONEXÃO E EVENTOS
 // ============================================================
 
 function scheduleReconnect() {
@@ -370,42 +358,16 @@ function connectBedrock() {
     client.on('join', () => {
       connecting = false;
       console.log('✅ Bot entrou no servidor Bedrock.');
-      requestPlayerListViaChat();
     });
     client.on('spawn', () => {
       connecting = false;
       console.log('✅ Bot apareceu no mundo.');
-    });
-    client.on('player_list', packet => {
-      processPlayerList(packet);
+      startListInterval();
     });
 
-    // LEITURA DE CHAT (/list parser)
+    // Intercepta as respostas de texto do servidor (incluindo o /list)
     client.on('text', packet => {
-      let rawText = packet.message || '';
-      if (packet.parameters && Array.isArray(packet.parameters)) {
-        rawText += ' ' + packet.parameters.join(' ');
-      }
-
-      // Remove códigos de cores (§a, §f, §r, etc.)
-      const cleanText = rawText.replace(/§[0-9a-fk-or]/gi, '').trim();
-
-      // Detecta resposta de comandos de lista de jogadores
-      if (cleanText.toLowerCase().includes('online') && cleanText.includes(':')) {
-        const parts = cleanText.split(':');
-        if (parts.length > 1) {
-          const nicksString = parts[1].trim();
-          if (nicksString) {
-            const nicks = nicksString.split(',').map(n => n.trim()).filter(Boolean);
-            if (nicks.length > 0) {
-              clearPlayers();
-              nicks.forEach((nick, idx) => jogadoresOnline.set(`chat_${idx}_${nick}`, nick));
-              console.log('📋 Nicks sincronizados via chat (/list):', nicks);
-              updateOnlineMessage();
-            }
-          }
-        }
-      }
+      parseListResponse(packet);
     });
 
     client.on('kick', packet => console.error('🚫 Bot expulso:', safeStringify(packet)));
@@ -422,6 +384,7 @@ function connectBedrock() {
     client.on('close', reason => {
       console.error('🔌 Conexão Bedrock fechada:', safeStringify(reason));
       connecting = false;
+      stopListInterval();
       if (mcClient === client) {
         mcClient = null;
         clearPlayers();
@@ -431,6 +394,7 @@ function connectBedrock() {
   } catch (error) {
     connecting = false;
     mcClient = null;
+    stopListInterval();
     console.error('❌ Falha ao criar cliente Bedrock:', error);
     scheduleReconnect();
   }
@@ -482,15 +446,7 @@ discordClient.on(Events.InteractionCreate, async interaction => {
   }
 
   if (interaction.commandName === 'online') {
-    requestPlayerListViaChat();
-    let realOnlineCount = undefined;
-    try {
-      const pingResult = await bedrock.ping({ host: CONFIG.MC_HOST, port: CONFIG.MC_PORT });
-      if (pingResult && pingResult.playersOnline !== undefined) {
-        realOnlineCount = pingResult.playersOnline;
-      }
-    } catch {}
-    await interaction.reply({ embeds: [onlineEmbed(realOnlineCount)] });
+    await interaction.reply({ embeds: [onlineEmbed(jogadoresOnline.size)] });
     return;
   }
 
