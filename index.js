@@ -70,7 +70,7 @@ let registrationInterval = null;
 let sendingRegistration = false;
 
 // ============================================================
-// UTILITÁRIOS
+// UTILITÁRIOS (CORRIGIDOS)
 // ============================================================
 
 function privateReply() {
@@ -104,18 +104,34 @@ function playerNames() {
     .sort((a, b) => a.localeCompare(b, 'pt-BR'));
 }
 
+// Extrai strings com segurança, resolvendo objetos UUID do bedrock-protocol
+function extractString(val) {
+  if (val == null) return null;
+  if (typeof val === 'string') return val;
+  if (typeof val === 'object') {
+    if (val.value != null) return String(val.value);
+    if (typeof val.toString === 'function' && val.toString() !== '[object Object]') {
+      return val.toString();
+    }
+  }
+  return String(val);
+}
+
 function playerId(player) {
-  const value = player?.uuid ?? player?.xuid ??
+  const rawId = player?.uuid ?? player?.xuid ?? player?.xbox_user_id ??
     player?.entity_unique_id ?? player?.entity_runtime_id ??
     player?.username ?? player?.name ?? player?.gamertag;
-  return value == null ? null : String(value);
+
+  const str = extractString(rawId);
+  return str ? str.trim().toLowerCase() : null;
 }
 
 function playerName(player) {
-  const value = player?.username ?? player?.name ??
+  const rawName = player?.username ?? player?.name ??
     player?.gamertag ?? player?.display_name ??
     player?.skin_data?.display_name ?? player?.player_name;
-  return value ? String(value) : null;
+
+  return extractString(rawName);
 }
 
 function packetRecords(packet) {
@@ -125,9 +141,24 @@ function packetRecords(packet) {
   return [];
 }
 
-function isRemovePacket(packet) {
-  const type = packet?.records?.type ?? packet?.type ?? packet?.action;
-  return type === 1 || type === 'remove' || type === 'REMOVE' || type === 'Remove';
+// Verifica se o registro é de remoção de jogador
+function isRemoveRecord(packet, record) {
+  const type = record?.type ?? record?.action ?? packet?.records?.type ?? packet?.type ?? packet?.action;
+
+  if (type === 1 || type === '1') return true;
+  if (typeof type === 'string') {
+    const lower = type.toLowerCase();
+    if (lower.includes('remove') || lower.includes('delete')) return true;
+  }
+
+  // Fallback: No protocolo Bedrock, pacotes de remoção enviam apenas UUID e não possuem nome/username
+  const hasName = Boolean(playerName(record));
+  const hasId = Boolean(playerId(record));
+  if (!hasName && hasId) {
+    return true;
+  }
+
+  return false;
 }
 
 function processPlayerList(packet) {
@@ -137,21 +168,26 @@ function processPlayerList(packet) {
     return;
   }
 
-  const removing = isRemovePacket(packet);
-
-  for (const player of records) {
-    const id = playerId(player);
-    const name = playerName(player);
+  for (const record of records) {
+    const id = playerId(record);
+    const name = playerName(record);
+    const removing = isRemoveRecord(packet, record);
 
     if (removing) {
-      if (id) jogadoresOnline.delete(id);
+      if (id) {
+        jogadoresOnline.delete(id);
+      }
       if (name) {
         for (const [key, savedName] of jogadoresOnline) {
-          if (savedName === name) jogadoresOnline.delete(key);
+          if (savedName.toLowerCase() === name.toLowerCase()) {
+            jogadoresOnline.delete(key);
+          }
         }
       }
-    } else if (id && name) {
-      jogadoresOnline.set(id, name);
+    } else {
+      if (id && name) {
+        jogadoresOnline.set(id, name);
+      }
     }
   }
 
