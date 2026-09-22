@@ -162,16 +162,18 @@ function processPlayerList(packet) {
 // EMBEDS
 // ============================================================
 
-function onlineEmbed() {
+function onlineEmbed(realOnlineCount) {
   const names = playerNames();
   let list = names.length ? names.map(name => `• ${name}`).join('\n') : 'Nenhum jogador online.';
   if (list.length > 1024) list = `${list.slice(0, 1000)}\n...`;
+
+  const totalDisplay = realOnlineCount !== undefined ? String(realOnlineCount) : String(names.length);
 
   return new EmbedBuilder()
     .setColor('#00FF00')
     .setTitle('🟢 Jogadores online')
     .addFields(
-      { name: '👥 Total', value: String(names.length), inline: true },
+      { name: '👥 Total', value: totalDisplay, inline: true },
       { name: '🌐 Servidor', value: `\`${CONFIG.MC_HOST}:${CONFIG.MC_PORT}\``, inline: true },
       { name: '🎮 Versão', value: `\`${CONFIG.MC_VERSION}\``, inline: true },
       { name: '📜 Nicks', value: list }
@@ -216,19 +218,47 @@ async function updateOnlineMessage() {
       return;
     }
 
+    // 1. Obtém o número real de jogadores via Ping no servidor Bedrock
+    let realOnlineCount = undefined;
+    try {
+      const pingResult = await bedrock.ping({ host: CONFIG.MC_HOST, port: CONFIG.MC_PORT });
+      if (pingResult && pingResult.playersOnline !== undefined) {
+        realOnlineCount = pingResult.playersOnline;
+      }
+    } catch (pingError) {
+      console.warn('⚠️ Não foi possível obter o ping direto, usando contagem da lista.');
+    }
+
+    // 2. Limpeza automática de jogadores fantasma acumulados
+    if (realOnlineCount === 0) {
+      clearPlayers();
+    } else if (realOnlineCount !== undefined && playerNames().length > realOnlineCount) {
+      console.log('🧹 Limpando jogadores fantasma acumulados na memória...');
+      clearPlayers();
+    }
+
+    // 3. Tenta encontrar a mensagem existente caso a memória tenha sido limpa
     let message = null;
     if (onlineMessageId) {
       try { message = await channel.messages.fetch(onlineMessageId); } catch { message = null; }
     }
 
+    if (!message) {
+      const recentMessages = await channel.messages.fetch({ limit: 10 });
+      message = recentMessages.find(m => m.author.id === discordClient.user.id);
+      if (message) onlineMessageId = message.id;
+    }
+
+    // 4. Edita a mensagem existente ou envia uma nova se nenhuma for encontrada
+    const embed = onlineEmbed(realOnlineCount);
     if (message) {
-      await message.edit({ embeds: [onlineEmbed()] });
+      await message.edit({ embeds: [embed] });
     } else {
-      message = await channel.send({ embeds: [onlineEmbed()] });
+      message = await channel.send({ embeds: [embed] });
       onlineMessageId = message.id;
     }
 
-    console.log(`🔄 Status atualizado com ${playerNames().length} jogador(es).`);
+    console.log(`🔄 Status atualizado (${realOnlineCount ?? playerNames().length} jogadores).`);
   } catch (error) {
     console.error('❌ Erro ao atualizar status:', error.message);
   } finally {
@@ -347,7 +377,6 @@ function connectBedrock() {
         return;
       }
       console.error('⚠️ Erro Bedrock:', error);
-      // O evento close controla a reconexão; não abrimos outra conexão aqui.
     });
 
     client.on('close', reason => {
@@ -413,7 +442,14 @@ discordClient.on(Events.InteractionCreate, async interaction => {
   }
 
   if (interaction.commandName === 'online') {
-    await interaction.reply({ embeds: [onlineEmbed()] });
+    let realOnlineCount = undefined;
+    try {
+      const pingResult = await bedrock.ping({ host: CONFIG.MC_HOST, port: CONFIG.MC_PORT });
+      if (pingResult && pingResult.playersOnline !== undefined) {
+        realOnlineCount = pingResult.playersOnline;
+      }
+    } catch {}
+    await interaction.reply({ embeds: [onlineEmbed(realOnlineCount)] });
     return;
   }
 
@@ -460,7 +496,6 @@ discordClient.login(CONFIG.DISCORD_TOKEN).catch(error => {
 
 process.on('uncaughtException', error => {
   console.error('❌ Erro não tratado:', error);
-  // Não ocultamos o erro; o Render poderá reiniciar o processo se necessário.
 });
 
 process.on('unhandledRejection', error => {
