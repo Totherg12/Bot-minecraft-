@@ -49,10 +49,12 @@ const discordClient = new Client({
 });
 
 // ============================================================
-// ESTADO
+// ESTADO E MAPEAMENTOS
 // ============================================================
 
 const jogadoresOnline = new Map();
+const temposJogadores = new Map(); // Mapeia NOME -> TEMPO (em minutos)
+const entitiesToNames = new Map(); // Mapeia ID DA ENTIDADE -> NOME
 
 let mcClient = null;
 let connecting = false;
@@ -70,7 +72,7 @@ let registrationInterval = null;
 let sendingRegistration = false;
 
 // ============================================================
-// UTILITÁRIOS (CORRIGIDOS)
+// UTILITÁRIOS
 // ============================================================
 
 function privateReply() {
@@ -96,6 +98,8 @@ function safeStringify(value) {
 
 function clearPlayers() {
   jogadoresOnline.clear();
+  temposJogadores.clear();
+  entitiesToNames.clear();
 }
 
 function playerNames() {
@@ -104,7 +108,6 @@ function playerNames() {
     .sort((a, b) => a.localeCompare(b, 'pt-BR'));
 }
 
-// Extrai strings com segurança, resolvendo objetos UUID do bedrock-protocol
 function extractString(val) {
   if (val == null) return null;
   if (typeof val === 'string') return val;
@@ -141,7 +144,6 @@ function packetRecords(packet) {
   return [];
 }
 
-// Verifica se o registro é de remoção de jogador
 function isRemoveRecord(packet, record) {
   const type = record?.type ?? record?.action ?? packet?.records?.type ?? packet?.type ?? packet?.action;
 
@@ -151,7 +153,6 @@ function isRemoveRecord(packet, record) {
     if (lower.includes('remove') || lower.includes('delete')) return true;
   }
 
-  // Fallback: No protocolo Bedrock, pacotes de remoção enviam apenas UUID e não possuem nome/username
   const hasName = Boolean(playerName(record));
   const hasId = Boolean(playerId(record));
   if (!hasName && hasId) {
@@ -164,7 +165,6 @@ function isRemoveRecord(packet, record) {
 function processPlayerList(packet) {
   const records = packetRecords(packet);
   if (!records.length) {
-    console.log('📦 player_list sem registros.');
     return;
   }
 
@@ -174,35 +174,60 @@ function processPlayerList(packet) {
     const removing = isRemoveRecord(packet, record);
 
     if (removing) {
-      if (id) {
-        jogadoresOnline.delete(id);
-      }
+      if (id) jogadoresOnline.delete(id);
       if (name) {
         for (const [key, savedName] of jogadoresOnline) {
           if (savedName.toLowerCase() === name.toLowerCase()) {
             jogadoresOnline.delete(key);
           }
         }
+        
+        // Remove os dados do jogador ao desconectar
+        temposJogadores.delete(name);
+        for (const [entId, entName] of entitiesToNames) {
+          if (entName.toLowerCase() === name.toLowerCase()) {
+            entitiesToNames.delete(entId);
+          }
+        }
       }
     } else {
       if (id && name) {
         jogadoresOnline.set(id, name);
+        // Salva o ID da entidade para parear com os pontos do Scoreboard depois
+        if (record.entity_unique_id != null) {
+          entitiesToNames.set(String(record.entity_unique_id), name);
+        }
       }
     }
   }
 
-  console.log(`👥 Lista: ${playerNames().length} jogador(es)`, playerNames());
+  console.log(`👥 Lista: ${playerNames().length} jogador(es)`);
   updateOnlineMessage();
 }
 
 // ============================================================
-// EMBEDS
+// EMBEDS COM TEMPO
 // ============================================================
+
+function getPlayerListString() {
+  const names = playerNames();
+  if (!names.length) return 'Nenhum jogador online.';
+
+  let list = names.map(name => {
+    const tempo = temposJogadores.get(name);
+    // Se o bot conseguiu capturar o tempo no placar, exibe ao lado do nome
+    if (tempo !== undefined) {
+      return `• ${name} — \`[${tempo} min]\``;
+    }
+    return `• ${name}`;
+  }).join('\n');
+
+  return list.length > 1024 ? `${list.slice(0, 1000)}\n...` : list;
+}
 
 function onlineEmbed() {
   const names = playerNames();
-  let list = names.length ? names.map(name => `• ${name}`).join('\n') : 'Nenhum jogador online.';
-  if (list.length > 1024) list = `${list.slice(0, 1000)}\n...`;
+  const list = getPlayerListString();
 
   return new EmbedBuilder()
     .setColor('#00FF00')
@@ -211,7 +236,7 @@ function onlineEmbed() {
       { name: '👥 Total', value: String(names.length), inline: true },
       { name: '🌐 Servidor', value: `\`${CONFIG.MC_HOST}:${CONFIG.MC_PORT}\``, inline: true },
       { name: '🎮 Versão', value: `\`${CONFIG.MC_VERSION}\``, inline: true },
-      { name: '📜 Nicks', value: list }
+      { name: '📜 Jogadores', value: list }
     )
     .setFooter({ text: 'Atualizado automaticamente a cada 30 segundos' })
     .setTimestamp();
@@ -219,8 +244,7 @@ function onlineEmbed() {
 
 function registrationEmbed() {
   const names = playerNames();
-  let list = names.length ? names.map(name => `• ${name}`).join('\n') : 'Nenhum jogador online.';
-  if (list.length > 1024) list = `${list.slice(0, 1000)}\n...`;
+  const list = getPlayerListString();
 
   const time = new Intl.DateTimeFormat('pt-BR', {
     timeZone: 'America/Sao_Paulo', dateStyle: 'short', timeStyle: 'medium'
@@ -264,8 +288,6 @@ async function updateOnlineMessage() {
       message = await channel.send({ embeds: [onlineEmbed()] });
       onlineMessageId = message.id;
     }
-
-    console.log(`🔄 Status atualizado com ${playerNames().length} jogador(es).`);
   } catch (error) {
     console.error('❌ Erro ao atualizar status:', error.message);
   } finally {
@@ -324,7 +346,7 @@ function stopRegistration() {
 }
 
 // ============================================================
-// BEDROCK: RECONEXÃO
+// BEDROCK: RECONEXÃO E LEITURA DE PLACARES
 // ============================================================
 
 function scheduleReconnect() {
@@ -372,19 +394,39 @@ function connectBedrock() {
       console.log('✅ Bot apareceu no mundo.');
     });
     client.on('player_list', packet => {
-      console.log('📋 player_list recebido.');
       processPlayerList(packet);
     });
+
+    // 🏆 ESCUTANDO O PLACAR (SCOREBOARD) PARA LER O TEMPO
+    client.on('set_score', packet => {
+      if (packet.action !== 0) return; // 0 significa adicionar/atualizar placar
+
+      for (const entry of packet.entries) {
+        let playerName = null;
+
+        // Tipo 1 ou 2 significa que o placar está atrelado à Entidade do Jogador
+        if ((entry.identity_type === 1 || entry.identity_type === 2) && entry.entity_unique_id != null) {
+          playerName = entitiesToNames.get(String(entry.entity_unique_id));
+        } 
+        // Tipo 3 é um nome falso em texto (muito usado em sidebars customizadas de Bedrock)
+        else if (entry.identity_type === 3 && entry.custom_name) {
+          const cName = extractString(entry.custom_name);
+          // Procura se tem algum player online com esse nome exato do placar
+          playerName = playerNames().find(n => n.toLowerCase() === cName.toLowerCase());
+        }
+
+        if (playerName) {
+          temposJogadores.set(playerName, entry.score);
+        }
+      }
+    });
+
     client.on('kick', packet => console.error('🚫 Bot expulso:', safeStringify(packet)));
-    client.on('disconnect', packet => console.error('🚫 Desconexão enviada pelo servidor:', safeStringify(packet)));
+    client.on('disconnect', packet => console.error('🚫 Desconexão enviada:', safeStringify(packet)));
 
     client.on('error', error => {
-      if (error?.partialReadError) {
-        console.warn('⚠️ Pacote incompatível ignorado:', error.message);
-        return;
-      }
+      if (error?.partialReadError) return;
       console.error('⚠️ Erro Bedrock:', error);
-      // O evento close controla a reconexão; não abrimos outra conexão aqui.
     });
 
     client.on('close', reason => {
