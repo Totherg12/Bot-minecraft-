@@ -131,10 +131,7 @@ function isRemovePacket(packet) {
 
 function processPlayerList(packet) {
   const records = packetRecords(packet);
-  if (!records.length) {
-    console.log('📦 player_list sem registros.');
-    return;
-  }
+  if (!records.length) return;
 
   const removing = isRemovePacket(packet);
 
@@ -153,9 +150,24 @@ function processPlayerList(packet) {
       jogadoresOnline.set(id, name);
     }
   }
+}
 
-  console.log(`👥 Lista: ${playerNames().length} jogador(es)`, playerNames());
-  updateOnlineMessage();
+// Envia o comando /list no chat do Minecraft
+function requestPlayerListViaChat() {
+  if (mcClient && !connecting) {
+    try {
+      mcClient.queue('text', {
+        type: 'chat',
+        needs_translation: false,
+        source_name: CONFIG.MC_USERNAME,
+        xuid: '',
+        platform_chat_id: '',
+        message: '/list'
+      });
+    } catch (error) {
+      console.warn('⚠️ Falha ao solicitar /list no chat:', error.message);
+    }
+  }
 }
 
 // ============================================================
@@ -212,13 +224,16 @@ async function updateOnlineMessage() {
   updatingOnlineMessage = true;
 
   try {
+    // 1. Pede a lista atualizada no chat do Minecraft
+    requestPlayerListViaChat();
+
     const channel = await discordClient.channels.fetch(onlineChannelId);
     if (!channel || channel.type !== ChannelType.GuildText) {
       console.error('❌ Canal de status inválido.');
       return;
     }
 
-    // 1. Obtém o número real de jogadores via Ping no servidor Bedrock
+    // 2. Obtém o número real via Ping UDP
     let realOnlineCount = undefined;
     try {
       const pingResult = await bedrock.ping({ host: CONFIG.MC_HOST, port: CONFIG.MC_PORT });
@@ -226,18 +241,14 @@ async function updateOnlineMessage() {
         realOnlineCount = pingResult.playersOnline;
       }
     } catch (pingError) {
-      console.warn('⚠️ Não foi possível obter o ping direto, usando contagem da lista.');
+      console.warn('⚠️ Não foi possível obter o ping direto.');
     }
 
-    // 2. Limpeza automática de jogadores fantasma acumulados
     if (realOnlineCount === 0) {
       clearPlayers();
-    } else if (realOnlineCount !== undefined && playerNames().length > realOnlineCount) {
-      console.log('🧹 Limpando jogadores fantasma acumulados na memória...');
-      clearPlayers();
     }
 
-    // 3. Tenta encontrar a mensagem existente caso a memória tenha sido limpa
+    // 3. Busca mensagem existente no chat do Discord
     let message = null;
     if (onlineMessageId) {
       try { message = await channel.messages.fetch(onlineMessageId); } catch { message = null; }
@@ -249,7 +260,7 @@ async function updateOnlineMessage() {
       if (message) onlineMessageId = message.id;
     }
 
-    // 4. Edita a mensagem existente ou envia uma nova se nenhuma for encontrada
+    // 4. Edita a mensagem fixada
     const embed = onlineEmbed(realOnlineCount);
     if (message) {
       await message.edit({ embeds: [embed] });
@@ -317,7 +328,7 @@ function stopRegistration() {
 }
 
 // ============================================================
-// BEDROCK: RECONEXÃO
+// BEDROCK: CONEXÃO E CHAT PARSER
 // ============================================================
 
 function scheduleReconnect() {
@@ -359,15 +370,44 @@ function connectBedrock() {
     client.on('join', () => {
       connecting = false;
       console.log('✅ Bot entrou no servidor Bedrock.');
+      requestPlayerListViaChat();
     });
     client.on('spawn', () => {
       connecting = false;
       console.log('✅ Bot apareceu no mundo.');
     });
     client.on('player_list', packet => {
-      console.log('📋 player_list recebido.');
       processPlayerList(packet);
     });
+
+    // LEITURA DE CHAT (/list parser)
+    client.on('text', packet => {
+      let rawText = packet.message || '';
+      if (packet.parameters && Array.isArray(packet.parameters)) {
+        rawText += ' ' + packet.parameters.join(' ');
+      }
+
+      // Remove códigos de cores (§a, §f, §r, etc.)
+      const cleanText = rawText.replace(/§[0-9a-fk-or]/gi, '').trim();
+
+      // Detecta resposta de comandos de lista de jogadores
+      if (cleanText.toLowerCase().includes('online') && cleanText.includes(':')) {
+        const parts = cleanText.split(':');
+        if (parts.length > 1) {
+          const nicksString = parts[1].trim();
+          if (nicksString) {
+            const nicks = nicksString.split(',').map(n => n.trim()).filter(Boolean);
+            if (nicks.length > 0) {
+              clearPlayers();
+              nicks.forEach((nick, idx) => jogadoresOnline.set(`chat_${idx}_${nick}`, nick));
+              console.log('📋 Nicks sincronizados via chat (/list):', nicks);
+              updateOnlineMessage();
+            }
+          }
+        }
+      }
+    });
+
     client.on('kick', packet => console.error('🚫 Bot expulso:', safeStringify(packet)));
     client.on('disconnect', packet => console.error('🚫 Desconexão enviada pelo servidor:', safeStringify(packet)));
 
@@ -397,7 +437,7 @@ function connectBedrock() {
 }
 
 // ============================================================
-// COMANDOS
+// COMANDOS DISCORD
 // ============================================================
 
 const commands = [
@@ -442,6 +482,7 @@ discordClient.on(Events.InteractionCreate, async interaction => {
   }
 
   if (interaction.commandName === 'online') {
+    requestPlayerListViaChat();
     let realOnlineCount = undefined;
     try {
       const pingResult = await bedrock.ping({ host: CONFIG.MC_HOST, port: CONFIG.MC_PORT });
