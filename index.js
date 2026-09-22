@@ -49,12 +49,15 @@ const discordClient = new Client({
 });
 
 // ============================================================
-// ESTADO E MAPEAMENTOS
+// ESTADO E MAPEAMENTOS DE PLACAR
 // ============================================================
 
 const jogadoresOnline = new Map();
 const temposJogadores = new Map(); // Mapeia NOME -> TEMPO (em minutos)
-const entitiesToNames = new Map(); // Mapeia ID DA ENTIDADE -> NOME
+
+// Mapeamentos para desvendar o Placar Oculto do Bedrock
+const entitiesToNames = new Map(); // ID único da entidade -> Nome
+const scoreToEntity = new Map();   // ID do Placar -> ID da Entidade
 
 let mcClient = null;
 let connecting = false;
@@ -75,22 +78,15 @@ let sendingRegistration = false;
 // UTILITÁRIOS
 // ============================================================
 
-function privateReply() {
-  return { flags: 64 };
-}
+function privateReply() { return { flags: 64 }; }
 
 function isAdmin(interaction) {
-  return interaction.memberPermissions?.has(
-    PermissionFlagsBits.Administrator
-  );
+  return interaction.memberPermissions?.has(PermissionFlagsBits.Administrator);
 }
 
 function safeStringify(value) {
   try {
-    return JSON.stringify(value, (_key, item) => {
-      if (typeof item === 'bigint') return `${item}n`;
-      return item;
-    }, 2);
+    return JSON.stringify(value, (_key, item) => (typeof item === 'bigint' ? `${item}n` : item), 2);
   } catch {
     return String(value);
   }
@@ -100,6 +96,7 @@ function clearPlayers() {
   jogadoresOnline.clear();
   temposJogadores.clear();
   entitiesToNames.clear();
+  scoreToEntity.clear();
 }
 
 function playerNames() {
@@ -113,27 +110,24 @@ function extractString(val) {
   if (typeof val === 'string') return val;
   if (typeof val === 'object') {
     if (val.value != null) return String(val.value);
-    if (typeof val.toString === 'function' && val.toString() !== '[object Object]') {
-      return val.toString();
-    }
+    if (typeof val.toString === 'function' && val.toString() !== '[object Object]') return val.toString();
   }
   return String(val);
 }
 
-function playerId(player) {
-  const rawId = player?.uuid ?? player?.xuid ?? player?.xbox_user_id ??
-    player?.entity_unique_id ?? player?.entity_runtime_id ??
-    player?.username ?? player?.name ?? player?.gamertag;
+function stripColors(str) {
+  if (!str) return str;
+  return str.replace(/§[0-9a-fk-or]/gi, '').trim();
+}
 
+function playerId(player) {
+  const rawId = player?.uuid ?? player?.xuid ?? player?.xbox_user_id ?? player?.username ?? player?.name;
   const str = extractString(rawId);
   return str ? str.trim().toLowerCase() : null;
 }
 
 function playerName(player) {
-  const rawName = player?.username ?? player?.name ??
-    player?.gamertag ?? player?.display_name ??
-    player?.skin_data?.display_name ?? player?.player_name;
-
+  const rawName = player?.username ?? player?.name ?? player?.gamertag ?? player?.display_name;
   return extractString(rawName);
 }
 
@@ -146,27 +140,14 @@ function packetRecords(packet) {
 
 function isRemoveRecord(packet, record) {
   const type = record?.type ?? record?.action ?? packet?.records?.type ?? packet?.type ?? packet?.action;
-
   if (type === 1 || type === '1') return true;
-  if (typeof type === 'string') {
-    const lower = type.toLowerCase();
-    if (lower.includes('remove') || lower.includes('delete')) return true;
-  }
-
-  const hasName = Boolean(playerName(record));
-  const hasId = Boolean(playerId(record));
-  if (!hasName && hasId) {
-    return true;
-  }
-
-  return false;
+  if (typeof type === 'string' && (type.toLowerCase().includes('remove') || type.toLowerCase().includes('delete'))) return true;
+  return !playerName(record) && playerId(record);
 }
 
 function processPlayerList(packet) {
   const records = packetRecords(packet);
-  if (!records.length) {
-    return;
-  }
+  if (!records.length) return;
 
   for (const record of records) {
     const id = playerId(record);
@@ -177,25 +158,20 @@ function processPlayerList(packet) {
       if (id) jogadoresOnline.delete(id);
       if (name) {
         for (const [key, savedName] of jogadoresOnline) {
-          if (savedName.toLowerCase() === name.toLowerCase()) {
-            jogadoresOnline.delete(key);
-          }
+          if (savedName.toLowerCase() === name.toLowerCase()) jogadoresOnline.delete(key);
         }
-        
-        // Remove os dados do jogador ao desconectar
         temposJogadores.delete(name);
         for (const [entId, entName] of entitiesToNames) {
-          if (entName.toLowerCase() === name.toLowerCase()) {
-            entitiesToNames.delete(entId);
-          }
+          if (entName.toLowerCase() === name.toLowerCase()) entitiesToNames.delete(entId);
         }
       }
     } else {
       if (id && name) {
         jogadoresOnline.set(id, name);
-        // Salva o ID da entidade para parear com os pontos do Scoreboard depois
-        if (record.entity_unique_id != null) {
-          entitiesToNames.set(String(record.entity_unique_id), name);
+        // O servidor avisa globalmente qual é o entity_unique_id deste jogador assim que ele entra
+        const entId = record.entity_unique_id ?? record.entity_id ?? record.runtime_entity_id;
+        if (entId != null) {
+          entitiesToNames.set(String(entId), name);
         }
       }
     }
@@ -206,7 +182,7 @@ function processPlayerList(packet) {
 }
 
 // ============================================================
-// EMBEDS COM TEMPO
+// EMBEDS
 // ============================================================
 
 function getPlayerListString() {
@@ -215,7 +191,6 @@ function getPlayerListString() {
 
   let list = names.map(name => {
     const tempo = temposJogadores.get(name);
-    // Se o bot conseguiu capturar o tempo no placar, exibe ao lado do nome
     if (tempo !== undefined) {
       return `• ${name} — \`[${tempo} min]\``;
     }
@@ -245,10 +220,7 @@ function onlineEmbed() {
 function registrationEmbed() {
   const names = playerNames();
   const list = getPlayerListString();
-
-  const time = new Intl.DateTimeFormat('pt-BR', {
-    timeZone: 'America/Sao_Paulo', dateStyle: 'short', timeStyle: 'medium'
-  }).format(new Date());
+  const time = new Intl.DateTimeFormat('pt-BR', { timeZone: 'America/Sao_Paulo', dateStyle: 'short', timeStyle: 'medium' }).format(new Date());
 
   return new EmbedBuilder()
     .setColor('#3498DB')
@@ -263,31 +235,23 @@ function registrationEmbed() {
 }
 
 // ============================================================
-// DISCORD: STATUS E REGISTROS
+// DISCORD
 // ============================================================
 
 async function updateOnlineMessage() {
   if (!onlineChannelId || updatingOnlineMessage || !discordClient.isReady()) return;
   updatingOnlineMessage = true;
-
   try {
     const channel = await discordClient.channels.fetch(onlineChannelId);
-    if (!channel || channel.type !== ChannelType.GuildText) {
-      console.error('❌ Canal de status inválido.');
-      return;
-    }
+    if (!channel || channel.type !== ChannelType.GuildText) return;
 
     let message = null;
     if (onlineMessageId) {
       try { message = await channel.messages.fetch(onlineMessageId); } catch { message = null; }
     }
 
-    if (message) {
-      await message.edit({ embeds: [onlineEmbed()] });
-    } else {
-      message = await channel.send({ embeds: [onlineEmbed()] });
-      onlineMessageId = message.id;
-    }
+    if (message) await message.edit({ embeds: [onlineEmbed()] });
+    else { message = await channel.send({ embeds: [onlineEmbed()] }); onlineMessageId = message.id; }
   } catch (error) {
     console.error('❌ Erro ao atualizar status:', error.message);
   } finally {
@@ -298,10 +262,8 @@ async function updateOnlineMessage() {
 function startOnlineUpdates() {
   if (onlineInterval) clearInterval(onlineInterval);
   if (!onlineChannelId) return;
-
   updateOnlineMessage();
   onlineInterval = setInterval(updateOnlineMessage, 30000);
-  console.log('🔄 Status automático a cada 30 segundos.');
 }
 
 function stopOnlineUpdates() {
@@ -314,15 +276,10 @@ function stopOnlineUpdates() {
 async function sendRegistration() {
   if (!registrationChannelId || sendingRegistration || !discordClient.isReady()) return;
   sendingRegistration = true;
-
   try {
     const channel = await discordClient.channels.fetch(registrationChannelId);
-    if (!channel || channel.type !== ChannelType.GuildText) {
-      console.error('❌ Canal de registros inválido.');
-      return;
-    }
+    if (!channel || channel.type !== ChannelType.GuildText) return;
     await channel.send({ embeds: [registrationEmbed()] });
-    console.log('📝 Novo registro acumulativo enviado.');
   } catch (error) {
     console.error('❌ Erro ao enviar registro:', error.message);
   } finally {
@@ -333,10 +290,8 @@ async function sendRegistration() {
 function startRegistration() {
   if (registrationInterval) clearInterval(registrationInterval);
   if (!registrationChannelId) return;
-
   sendRegistration();
   registrationInterval = setInterval(sendRegistration, 45000);
-  console.log('📝 Registros automáticos a cada 45 segundos.');
 }
 
 function stopRegistration() {
@@ -346,24 +301,18 @@ function stopRegistration() {
 }
 
 // ============================================================
-// BEDROCK: RECONEXÃO E LEITURA DE PLACARES
+// BEDROCK
 // ============================================================
 
 function scheduleReconnect() {
   if (shuttingDown || reconnectTimer) return;
-
   console.log(`🔄 Nova tentativa Bedrock em ${RECONNECT_DELAY / 1000}s...`);
-  reconnectTimer = setTimeout(() => {
-    reconnectTimer = null;
-    connectBedrock();
-  }, RECONNECT_DELAY);
+  reconnectTimer = setTimeout(() => { reconnectTimer = null; connectBedrock(); }, RECONNECT_DELAY);
 }
 
 function connectBedrock() {
   if (shuttingDown || connecting) return;
   connecting = true;
-
-  console.log(`🔄 Conectando a ${CONFIG.MC_HOST}:${CONFIG.MC_PORT} (${CONFIG.MC_VERSION})...`);
 
   let client;
   try {
@@ -374,9 +323,7 @@ function connectBedrock() {
       version: CONFIG.MC_VERSION,
       offline: CONFIG.MC_OFFLINE,
       connectTimeout: 15000,
-      conLog: console.log,
       onMsaCode: data => {
-        console.log('🔐 Autenticação Microsoft necessária.');
         console.log(`🌐 Acesse: ${data.verification_uri}`);
         console.log(`🔑 Código: ${data.user_code}`);
       }
@@ -384,65 +331,53 @@ function connectBedrock() {
 
     mcClient = client;
 
-    client.on('connect_allowed', () => console.log('✅ RakNet permitido.'));
-    client.on('join', () => {
-      connecting = false;
-      console.log('✅ Bot entrou no servidor Bedrock.');
-    });
-    client.on('spawn', () => {
-      connecting = false;
-      console.log('✅ Bot apareceu no mundo.');
-    });
-    client.on('player_list', packet => {
-      processPlayerList(packet);
+    client.on('join', () => { connecting = false; console.log('✅ Bot entrou no servidor Bedrock.'); });
+    client.on('player_list', packet => processPlayerList(packet));
+
+    // 🎯 Captura a relação de Placares (Scoreboards) e Jogadores Globalmente
+    client.on('set_scoreboard_identity', packet => {
+      if (packet.action === 0) { // 0 = Registrar identidade ao Placar
+        for (const entry of packet.entries) {
+          if (entry.scoreboard_id != null && entry.entity_unique_id != null) {
+            scoreToEntity.set(String(entry.scoreboard_id), String(entry.entity_unique_id));
+          }
+        }
+      }
     });
 
-    // 🏆 ESCUTANDO O PLACAR (SCOREBOARD) PARA LER O TEMPO
+    // 🎯 Captura e atualiza o número de tempo
     client.on('set_score', packet => {
-      if (packet.action !== 0) return; // 0 significa adicionar/atualizar placar
+      if (packet.action !== 0) return; // 0 = Atualização de valor
 
       for (const entry of packet.entries) {
         let playerName = null;
 
-        // Tipo 1 ou 2 significa que o placar está atrelado à Entidade do Jogador
-        if ((entry.identity_type === 1 || entry.identity_type === 2) && entry.entity_unique_id != null) {
-          playerName = entitiesToNames.get(String(entry.entity_unique_id));
-        } 
-        // Tipo 3 é um nome falso em texto (muito usado em sidebars customizadas de Bedrock)
-        else if (entry.identity_type === 3 && entry.custom_name) {
-          const cName = extractString(entry.custom_name);
-          // Procura se tem algum player online com esse nome exato do placar
+        const rawEntId = entry.entity_unique_id != null ? String(entry.entity_unique_id) : null;
+        const scoreId = entry.scoreboard_id != null ? String(entry.scoreboard_id) : null;
+
+        // Tenta achar o nome pela Entidade Direta
+        if (rawEntId && rawEntId !== '0') playerName = entitiesToNames.get(rawEntId);
+        
+        // Tenta achar pelo mapeamento que o scoreboard_identity revelou
+        if (!playerName && scoreId) {
+          const mappedEnt = scoreToEntity.get(scoreId);
+          if (mappedEnt) playerName = entitiesToNames.get(mappedEnt);
+        }
+
+        // Tenta achar por um nome falso direto na lista (usado muito em PocketMine)
+        if (!playerName && entry.custom_name) {
+          const cName = stripColors(extractString(entry.custom_name));
           playerName = playerNames().find(n => n.toLowerCase() === cName.toLowerCase());
         }
 
-        if (playerName) {
-          temposJogadores.set(playerName, entry.score);
-        }
+        if (playerName) temposJogadores.set(playerName, entry.score);
       }
     });
 
-    client.on('kick', packet => console.error('🚫 Bot expulso:', safeStringify(packet)));
-    client.on('disconnect', packet => console.error('🚫 Desconexão enviada:', safeStringify(packet)));
-
-    client.on('error', error => {
-      if (error?.partialReadError) return;
-      console.error('⚠️ Erro Bedrock:', error);
-    });
-
-    client.on('close', reason => {
-      console.error('🔌 Conexão Bedrock fechada:', safeStringify(reason));
-      connecting = false;
-      if (mcClient === client) {
-        mcClient = null;
-        clearPlayers();
-      }
-      scheduleReconnect();
-    });
+    client.on('error', error => { if (!error?.partialReadError) console.error('⚠️ Erro Bedrock:', error.message); });
+    client.on('close', () => { connecting = false; if (mcClient === client) { mcClient = null; clearPlayers(); } scheduleReconnect(); });
   } catch (error) {
-    connecting = false;
-    mcClient = null;
-    console.error('❌ Falha ao criar cliente Bedrock:', error);
-    scheduleReconnect();
+    connecting = false; mcClient = null; scheduleReconnect();
   }
 }
 
@@ -465,145 +400,56 @@ const commands = [
 async function registerCommands() {
   const rest = new REST({ version: '10' }).setToken(CONFIG.DISCORD_TOKEN);
   await rest.put(Routes.applicationCommands(CONFIG.CLIENT_ID), { body: commands });
-  console.log('✅ Comandos registrados.');
 }
 
 discordClient.once(Events.ClientReady, async client => {
   console.log(`🤖 Discord conectado como ${client.user.tag}`);
   try {
-    await registerCommands();
-    connectBedrock();
+    await registerCommands(); connectBedrock();
     if (onlineChannelId) startOnlineUpdates();
     if (registrationChannelId) startRegistration();
-  } catch (error) {
-    console.error('❌ Erro na inicialização:', error);
-  }
+  } catch (error) { console.error('❌ Erro na inicialização:', error); }
 });
 
 discordClient.on(Events.InteractionCreate, async interaction => {
   if (!interaction.isChatInputCommand()) return;
+  if (!isAdmin(interaction)) return interaction.reply({ content: '❌ Apenas administradores podem usar os comandos.', ...privateReply() });
 
-  if (!isAdmin(interaction)) {
-    await interaction.reply({
-      content: '❌ Apenas administradores podem usar os comandos.',
-      ...privateReply()
-    });
-    return;
-  }
-
-  if (interaction.commandName === 'online') {
-    await interaction.reply({ embeds: [onlineEmbed()] });
-    return;
-  }
-
+  if (interaction.commandName === 'online') return interaction.reply({ embeds: [onlineEmbed()] });
   if (interaction.commandName === 'configurar-online') {
-    const channel = interaction.options.getChannel('canal');
-    onlineChannelId = channel.id;
-    onlineMessageId = null;
-    startOnlineUpdates();
-    await interaction.reply({
-      content: `✅ Status configurado em ${channel} e enviado imediatamente.`,
-      ...privateReply()
-    });
-    return;
+    onlineChannelId = interaction.options.getChannel('canal').id; onlineMessageId = null; startOnlineUpdates();
+    return interaction.reply({ content: `✅ Status configurado.`, ...privateReply() });
   }
-
-  if (interaction.commandName === 'parar-online') {
-    stopOnlineUpdates();
-    await interaction.reply({ content: '✅ Status parado.', ...privateReply() });
-    return;
-  }
-
+  if (interaction.commandName === 'parar-online') { stopOnlineUpdates(); return interaction.reply({ content: '✅ Status parado.', ...privateReply() }); }
   if (interaction.commandName === 'configurar-registro') {
-    const channel = interaction.options.getChannel('canal');
-    registrationChannelId = channel.id;
-    startRegistration();
-    await interaction.reply({
-      content: `✅ Registros configurados em ${channel}.`,
-      ...privateReply()
-    });
-    return;
+    registrationChannelId = interaction.options.getChannel('canal').id; startRegistration();
+    return interaction.reply({ content: `✅ Registros configurados.`, ...privateReply() });
   }
-
-  if (interaction.commandName === 'parar-registro') {
-    stopRegistration();
-    await interaction.reply({ content: '✅ Registros parados.', ...privateReply() });
-  }
+  if (interaction.commandName === 'parar-registro') { stopRegistration(); return interaction.reply({ content: '✅ Registros parados.', ...privateReply() }); }
 });
 
 discordClient.on(Events.Error, error => console.error('❌ Erro Discord:', error));
 
-// ============================================================
-// SINAL DE VIDA E ENCERRAMENTO SEGURO
-// ============================================================
-
 function startHeartbeat() {
-  if (heartbeatInterval) {
-    clearInterval(heartbeatInterval);
-  }
-
-  heartbeatInterval = setInterval(() => {
-    console.log(
-      `💓 Bot ativo | Discord: ${discordClient.isReady() ? 'online' : 'offline'} | ` +
-      `Minecraft: ${mcClient ? 'conectado' : 'desconectado'} | ` +
-      `Jogadores: ${playerNames().length}`
-    );
-  }, 30000);
+  if (heartbeatInterval) clearInterval(heartbeatInterval);
+  heartbeatInterval = setInterval(() => console.log(`💓 Bot ativo | Jogadores: ${playerNames().length}`), 30000);
 }
 
 async function shutdown(reason, exitCode = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
-
-  console.log(`🛑 Encerrando o processo: ${reason}`);
-
-  if (reconnectTimer) {
-    clearTimeout(reconnectTimer);
-    reconnectTimer = null;
-  }
-
+  if (reconnectTimer) clearTimeout(reconnectTimer);
   if (onlineInterval) clearInterval(onlineInterval);
   if (registrationInterval) clearInterval(registrationInterval);
   if (heartbeatInterval) clearInterval(heartbeatInterval);
-
-  try {
-    mcClient?.close();
-  } catch (error) {
-    console.error('⚠️ Erro ao fechar Minecraft:', error);
-  }
-
-  try {
-    discordClient.destroy();
-  } catch (error) {
-    console.error('⚠️ Erro ao fechar Discord:', error);
-  }
-
+  try { mcClient?.close(); } catch (e) {}
+  try { discordClient.destroy(); } catch (e) {}
   process.exit(exitCode);
 }
 
 startHeartbeat();
-
-discordClient.login(CONFIG.DISCORD_TOKEN).catch(error => {
-  console.error('❌ Falha no login do Discord:', error);
-  shutdown('falha no login do Discord', 1);
-});
-
-process.on('uncaughtException', error => {
-  console.error('❌ Erro fatal não tratado:');
-  console.error(error);
-  shutdown('uncaughtException', 1);
-});
-
-process.on('unhandledRejection', error => {
-  console.error('❌ Promise rejeitada sem tratamento:');
-  console.error(error);
-  shutdown('unhandledRejection', 1);
-});
-
-process.on('SIGTERM', () => {
-  shutdown('SIGTERM recebido pelo Render', 0);
-});
-
-process.on('SIGINT', () => {
-  shutdown('SIGINT recebido', 0);
-});
+discordClient.login(CONFIG.DISCORD_TOKEN).catch(() => shutdown('falha no login', 1));
+process.on('uncaughtException', () => shutdown('uncaughtException', 1));
+process.on('unhandledRejection', () => shutdown('unhandledRejection', 1));
+process.on('SIGTERM', () => shutdown('SIGTERM recebido', 0));
+process.on('SIGINT', () => shutdown('SIGINT recebido', 0));
