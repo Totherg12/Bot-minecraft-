@@ -34,30 +34,26 @@ const CONFIG = {
   REGISTRATION_CHANNEL_ID: process.env.REGISTRATION_CHANNEL_ID || null
 };
 
-if (!CONFIG.DISCORD_TOKEN || !CONFIG.CLIENT_ID) {
-  console.error('❌ Configure DISCORD_TOKEN e CLIENT_ID no Render.');
-  process.exit(1);
-}
-
 app.get('/', (_req, res) => res.status(200).send('Bot online!'));
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🌐 HTTP ativo na porta ${PORT}`);
-});
+app.listen(PORT, '0.0.0.0', () => console.log(`🌐 HTTP ativo na porta ${PORT}`));
 
-const discordClient = new Client({
-  intents: [GatewayIntentBits.Guilds]
-});
+const discordClient = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 // ============================================================
-// ESTADO E MAPEAMENTOS DE PLACAR
+// ESTADO E BANCO DE DADOS TEMPORÁRIO (REDE DE ARRASTÃO)
 // ============================================================
 
-const jogadoresOnline = new Map();
-const temposJogadores = new Map(); // Mapeia NOME -> TEMPO (em minutos)
+const jogadoresOnline = new Map(); // Nome -> { uuid, entityId }
 
-// Mapeamentos para desvendar o Placar Oculto do Bedrock
-const entitiesToNames = new Map(); // ID único da entidade -> Nome
-const scoreToEntity = new Map();   // ID do Placar -> ID da Entidade
+// Placar Global
+const globalScoreIdentity = new Map(); // scoreboard_id -> entity_unique_id
+const globalScoreName = new Map();     // scoreboard_id -> custom_name (Nome fake)
+const scoresByObjective = new Map();   // objective_name -> Map<scoreboard_id, score>
+let listObjective = null;              // Qual o nome do placar que fica no menu de pausa
+
+// Hologramas físicos (Fallback)
+const temposPorHolograma = new Map();
+const runtimeToNames = new Map();
 
 let mcClient = null;
 let connecting = false;
@@ -79,30 +75,16 @@ let sendingRegistration = false;
 // ============================================================
 
 function privateReply() { return { flags: 64 }; }
-
-function isAdmin(interaction) {
-  return interaction.memberPermissions?.has(PermissionFlagsBits.Administrator);
-}
-
-function safeStringify(value) {
-  try {
-    return JSON.stringify(value, (_key, item) => (typeof item === 'bigint' ? `${item}n` : item), 2);
-  } catch {
-    return String(value);
-  }
-}
+function isAdmin(interaction) { return interaction.memberPermissions?.has(PermissionFlagsBits.Administrator); }
 
 function clearPlayers() {
   jogadoresOnline.clear();
-  temposJogadores.clear();
-  entitiesToNames.clear();
-  scoreToEntity.clear();
-}
-
-function playerNames() {
-  return [...new Set(jogadoresOnline.values())]
-    .filter(Boolean)
-    .sort((a, b) => a.localeCompare(b, 'pt-BR'));
+  globalScoreIdentity.clear();
+  globalScoreName.clear();
+  scoresByObjective.clear();
+  temposPorHolograma.clear();
+  runtimeToNames.clear();
+  listObjective = null;
 }
 
 function extractString(val) {
@@ -122,8 +104,7 @@ function stripColors(str) {
 
 function playerId(player) {
   const rawId = player?.uuid ?? player?.xuid ?? player?.xbox_user_id ?? player?.username ?? player?.name;
-  const str = extractString(rawId);
-  return str ? str.trim().toLowerCase() : null;
+  return extractString(rawId)?.trim().toLowerCase() || null;
 }
 
 function playerName(player) {
@@ -145,52 +126,50 @@ function isRemoveRecord(packet, record) {
   return !playerName(record) && playerId(record);
 }
 
-function processPlayerList(packet) {
-  const records = packetRecords(packet);
-  if (!records.length) return;
+// ============================================================
+// CRUZAMENTO DE DADOS (ACHANDO O TEMPO DO JOGADOR)
+// ============================================================
 
-  for (const record of records) {
-    const id = playerId(record);
-    const name = playerName(record);
-    const removing = isRemoveRecord(packet, record);
+function getPlayerTime(playerName) {
+  const pData = jogadoresOnline.get(playerName);
+  const entId = pData ? pData.entityId : null;
 
-    if (removing) {
-      if (id) jogadoresOnline.delete(id);
-      if (name) {
-        for (const [key, savedName] of jogadoresOnline) {
-          if (savedName.toLowerCase() === name.toLowerCase()) jogadoresOnline.delete(key);
-        }
-        temposJogadores.delete(name);
-        for (const [entId, entName] of entitiesToNames) {
-          if (entName.toLowerCase() === name.toLowerCase()) entitiesToNames.delete(entId);
-        }
-      }
-    } else {
-      if (id && name) {
-        jogadoresOnline.set(id, name);
-        // O servidor avisa globalmente qual é o entity_unique_id deste jogador assim que ele entra
-        const entId = record.entity_unique_id ?? record.entity_id ?? record.runtime_entity_id;
-        if (entId != null) {
-          entitiesToNames.set(String(entId), name);
-        }
-      }
+  // 1. Tenta buscar no Placar Global
+  // Se o servidor avisou que um dos placares é o "list" (menu de pausa), focamos nele.
+  const objectivesToCheck = listObjective ? [listObjective] : [...scoresByObjective.keys()];
+
+  for (const obj of objectivesToCheck) {
+    const scores = scoresByObjective.get(obj);
+    if (!scores) continue;
+
+    for (const [sId, score] of scores.entries()) {
+      // Método A: Verifica se o ID Físico da entidade bate
+      if (entId && globalScoreIdentity.get(sId) === entId) return score;
+
+      // Método B: Verifica se o servidor enviou o nome no placar
+      const cName = globalScoreName.get(sId);
+      if (cName && cName.toLowerCase().includes(playerName.toLowerCase())) return score;
     }
   }
 
-  console.log(`👥 Lista: ${playerNames().length} jogador(es)`);
-  updateOnlineMessage();
+  // 2. Fallback: Se o jogador estiver perto do bot e tiver holograma
+  if (temposPorHolograma.has(playerName)) {
+    return temposPorHolograma.get(playerName);
+  }
+
+  return undefined;
 }
 
 // ============================================================
-// EMBEDS
+// GERAÇÃO DOS EMBEDS (MENSAGENS)
 // ============================================================
 
 function getPlayerListString() {
-  const names = playerNames();
+  const names = [...jogadoresOnline.keys()].sort((a, b) => a.localeCompare(b, 'pt-BR'));
   if (!names.length) return 'Nenhum jogador online.';
 
   let list = names.map(name => {
-    const tempo = temposJogadores.get(name);
+    const tempo = getPlayerTime(name);
     if (tempo !== undefined) {
       return `• ${name} — \`[${tempo} min]\``;
     }
@@ -201,14 +180,12 @@ function getPlayerListString() {
 }
 
 function onlineEmbed() {
-  const names = playerNames();
   const list = getPlayerListString();
-
   return new EmbedBuilder()
     .setColor('#00FF00')
     .setTitle('🟢 Jogadores online')
     .addFields(
-      { name: '👥 Total', value: String(names.length), inline: true },
+      { name: '👥 Total', value: String(jogadoresOnline.size), inline: true },
       { name: '🌐 Servidor', value: `\`${CONFIG.MC_HOST}:${CONFIG.MC_PORT}\``, inline: true },
       { name: '🎮 Versão', value: `\`${CONFIG.MC_VERSION}\``, inline: true },
       { name: '📜 Jogadores', value: list }
@@ -218,7 +195,6 @@ function onlineEmbed() {
 }
 
 function registrationEmbed() {
-  const names = playerNames();
   const list = getPlayerListString();
   const time = new Intl.DateTimeFormat('pt-BR', { timeZone: 'America/Sao_Paulo', dateStyle: 'short', timeStyle: 'medium' }).format(new Date());
 
@@ -226,7 +202,7 @@ function registrationEmbed() {
     .setColor('#3498DB')
     .setTitle('📋 Registro de jogadores online')
     .addFields(
-      { name: '👥 Total', value: String(names.length), inline: true },
+      { name: '👥 Total', value: String(jogadoresOnline.size), inline: true },
       { name: '🕒 Horário', value: time, inline: true },
       { name: '📜 Jogadores', value: list }
     )
@@ -235,7 +211,7 @@ function registrationEmbed() {
 }
 
 // ============================================================
-// DISCORD
+// CONEXÃO DISCORD
 // ============================================================
 
 async function updateOnlineMessage() {
@@ -252,11 +228,7 @@ async function updateOnlineMessage() {
 
     if (message) await message.edit({ embeds: [onlineEmbed()] });
     else { message = await channel.send({ embeds: [onlineEmbed()] }); onlineMessageId = message.id; }
-  } catch (error) {
-    console.error('❌ Erro ao atualizar status:', error.message);
-  } finally {
-    updatingOnlineMessage = false;
-  }
+  } catch (error) {} finally { updatingOnlineMessage = false; }
 }
 
 function startOnlineUpdates() {
@@ -268,9 +240,7 @@ function startOnlineUpdates() {
 
 function stopOnlineUpdates() {
   if (onlineInterval) clearInterval(onlineInterval);
-  onlineInterval = null;
-  onlineChannelId = null;
-  onlineMessageId = null;
+  onlineInterval = null; onlineChannelId = null; onlineMessageId = null;
 }
 
 async function sendRegistration() {
@@ -280,11 +250,7 @@ async function sendRegistration() {
     const channel = await discordClient.channels.fetch(registrationChannelId);
     if (!channel || channel.type !== ChannelType.GuildText) return;
     await channel.send({ embeds: [registrationEmbed()] });
-  } catch (error) {
-    console.error('❌ Erro ao enviar registro:', error.message);
-  } finally {
-    sendingRegistration = false;
-  }
+  } catch (error) {} finally { sendingRegistration = false; }
 }
 
 function startRegistration() {
@@ -296,17 +262,39 @@ function startRegistration() {
 
 function stopRegistration() {
   if (registrationInterval) clearInterval(registrationInterval);
-  registrationInterval = null;
-  registrationChannelId = null;
+  registrationInterval = null; registrationChannelId = null;
 }
 
 // ============================================================
-// BEDROCK
+// CONEXÃO BEDROCK
 // ============================================================
+
+function processPlayerList(packet) {
+  const records = packetRecords(packet);
+  if (!records.length) return;
+
+  for (const record of records) {
+    const id = playerId(record);
+    const name = playerName(record);
+    const removing = isRemoveRecord(packet, record);
+
+    if (removing) {
+      if (name) jogadoresOnline.delete(name);
+      else if (id) {
+        for (const [n, data] of jogadoresOnline.entries()) {
+          if (data.uuid === id) jogadoresOnline.delete(n);
+        }
+      }
+    } else if (name) {
+      const entId = record.entity_unique_id ?? record.entity_id ?? record.runtime_entity_id;
+      jogadoresOnline.set(name, { uuid: id, entityId: entId != null ? String(entId) : null });
+    }
+  }
+  updateOnlineMessage();
+}
 
 function scheduleReconnect() {
   if (shuttingDown || reconnectTimer) return;
-  console.log(`🔄 Nova tentativa Bedrock em ${RECONNECT_DELAY / 1000}s...`);
   reconnectTimer = setTimeout(() => { reconnectTimer = null; connectBedrock(); }, RECONNECT_DELAY);
 }
 
@@ -334,43 +322,49 @@ function connectBedrock() {
     client.on('join', () => { connecting = false; console.log('✅ Bot entrou no servidor Bedrock.'); });
     client.on('player_list', packet => processPlayerList(packet));
 
-    // 🎯 Captura a relação de Placares (Scoreboards) e Jogadores Globalmente
-    client.on('set_scoreboard_identity', packet => {
-      if (packet.action === 0) { // 0 = Registrar identidade ao Placar
-        for (const entry of packet.entries) {
-          if (entry.scoreboard_id != null && entry.entity_unique_id != null) {
-            scoreToEntity.set(String(entry.scoreboard_id), String(entry.entity_unique_id));
-          }
+    // 🎯 Captura a criação de objetivos no Placar
+    client.on('set_display_objective', packet => {
+      console.log(`[DEBUG PLACAR] Servidor enviou objetivo: Slot '${packet.display_slot}' -> Nome '${packet.objective_name}'`);
+      if (packet.display_slot === 'list') listObjective = packet.objective_name;
+    });
+
+    // 🎯 Captura TODOS os valores de placar enviados
+    client.on('set_score', packet => {
+      if (packet.action !== 0) return;
+      for (const entry of packet.entries) {
+        const obj = entry.objective_name;
+        if (!scoresByObjective.has(obj)) scoresByObjective.set(obj, new Map());
+        scoresByObjective.get(obj).set(String(entry.scoreboard_id), entry.score);
+
+        if (entry.identity_type === 3 && entry.custom_name) {
+          globalScoreName.set(String(entry.scoreboard_id), stripColors(extractString(entry.custom_name)));
+        } else if (entry.entity_unique_id != null) {
+          globalScoreIdentity.set(String(entry.scoreboard_id), String(entry.entity_unique_id));
         }
       }
     });
 
-    // 🎯 Captura e atualiza o número de tempo
-    client.on('set_score', packet => {
-      if (packet.action !== 0) return; // 0 = Atualização de valor
-
+    // 🎯 Captura mapeamento de Identidades do Placar
+    client.on('set_scoreboard_identity', packet => {
+      if (packet.action !== 0) return;
       for (const entry of packet.entries) {
-        let playerName = null;
-
-        const rawEntId = entry.entity_unique_id != null ? String(entry.entity_unique_id) : null;
-        const scoreId = entry.scoreboard_id != null ? String(entry.scoreboard_id) : null;
-
-        // Tenta achar o nome pela Entidade Direta
-        if (rawEntId && rawEntId !== '0') playerName = entitiesToNames.get(rawEntId);
-        
-        // Tenta achar pelo mapeamento que o scoreboard_identity revelou
-        if (!playerName && scoreId) {
-          const mappedEnt = scoreToEntity.get(scoreId);
-          if (mappedEnt) playerName = entitiesToNames.get(mappedEnt);
+        if (entry.scoreboard_id != null && entry.entity_unique_id != null) {
+          globalScoreIdentity.set(String(entry.scoreboard_id), String(entry.entity_unique_id));
         }
+      }
+    });
 
-        // Tenta achar por um nome falso direto na lista (usado muito em PocketMine)
-        if (!playerName && entry.custom_name) {
-          const cName = stripColors(extractString(entry.custom_name));
-          playerName = playerNames().find(n => n.toLowerCase() === cName.toLowerCase());
+    // Fallback: Lendo hologramas na cabeça (se o bot vir alguém)
+    client.on('add_player', packet => {
+      const name = extractString(packet.username);
+      if (name && packet.runtime_id) runtimeToNames.set(String(packet.runtime_id), name);
+      if (name && packet.metadata) {
+        for (const item of packet.metadata) {
+          if (item.key === 4 || item.key === 'nametag') {
+             const match = stripColors(extractString(item.value)).match(/([\d.,]+)\s*TEMPO/i);
+             if (match) temposPorHolograma.set(name, match[1]);
+          }
         }
-
-        if (playerName) temposJogadores.set(playerName, entry.score);
       }
     });
 
@@ -382,74 +376,49 @@ function connectBedrock() {
 }
 
 // ============================================================
-// COMANDOS
+// COMANDOS E INICIALIZAÇÃO DO DISCORD
 // ============================================================
 
 const commands = [
   new SlashCommandBuilder().setName('online').setDescription('Mostra os jogadores online'),
-  new SlashCommandBuilder()
-    .setName('configurar-online').setDescription('Escolhe o canal do status')
-    .addChannelOption(option => option.setName('canal').setDescription('Canal de status').addChannelTypes(ChannelType.GuildText).setRequired(true)),
-  new SlashCommandBuilder().setName('parar-online').setDescription('Para o status automático'),
-  new SlashCommandBuilder()
-    .setName('configurar-registro').setDescription('Escolhe o canal dos registros')
-    .addChannelOption(option => option.setName('canal').setDescription('Canal de registros').addChannelTypes(ChannelType.GuildText).setRequired(true)),
+  new SlashCommandBuilder().setName('configurar-online').setDescription('Escolhe o canal do status').addChannelOption(opt => opt.setName('canal').setDescription('Canal').addChannelTypes(ChannelType.GuildText).setRequired(true)),
+  new SlashCommandBuilder().setName('parar-online').setDescription('Para o status'),
+  new SlashCommandBuilder().setName('configurar-registro').setDescription('Escolhe o canal dos registros').addChannelOption(opt => opt.setName('canal').setDescription('Canal').addChannelTypes(ChannelType.GuildText).setRequired(true)),
   new SlashCommandBuilder().setName('parar-registro').setDescription('Para os registros')
 ].map(command => command.setDefaultMemberPermissions(PermissionFlagsBits.Administrator.toString()).toJSON());
-
-async function registerCommands() {
-  const rest = new REST({ version: '10' }).setToken(CONFIG.DISCORD_TOKEN);
-  await rest.put(Routes.applicationCommands(CONFIG.CLIENT_ID), { body: commands });
-}
 
 discordClient.once(Events.ClientReady, async client => {
   console.log(`🤖 Discord conectado como ${client.user.tag}`);
   try {
-    await registerCommands(); connectBedrock();
+    await new REST({ version: '10' }).setToken(CONFIG.DISCORD_TOKEN).put(Routes.applicationCommands(CONFIG.CLIENT_ID), { body: commands });
+    connectBedrock();
     if (onlineChannelId) startOnlineUpdates();
     if (registrationChannelId) startRegistration();
-  } catch (error) { console.error('❌ Erro na inicialização:', error); }
+  } catch (error) {}
 });
 
 discordClient.on(Events.InteractionCreate, async interaction => {
   if (!interaction.isChatInputCommand()) return;
-  if (!isAdmin(interaction)) return interaction.reply({ content: '❌ Apenas administradores podem usar os comandos.', ...privateReply() });
+  if (!isAdmin(interaction)) return interaction.reply({ content: '❌ Apenas administradores podem usar.', ...privateReply() });
 
   if (interaction.commandName === 'online') return interaction.reply({ embeds: [onlineEmbed()] });
   if (interaction.commandName === 'configurar-online') {
     onlineChannelId = interaction.options.getChannel('canal').id; onlineMessageId = null; startOnlineUpdates();
     return interaction.reply({ content: `✅ Status configurado.`, ...privateReply() });
   }
-  if (interaction.commandName === 'parar-online') { stopOnlineUpdates(); return interaction.reply({ content: '✅ Status parado.', ...privateReply() }); }
+  if (interaction.commandName === 'parar-online') { stopOnlineUpdates(); return interaction.reply({ content: '✅ Parado.', ...privateReply() }); }
   if (interaction.commandName === 'configurar-registro') {
     registrationChannelId = interaction.options.getChannel('canal').id; startRegistration();
     return interaction.reply({ content: `✅ Registros configurados.`, ...privateReply() });
   }
-  if (interaction.commandName === 'parar-registro') { stopRegistration(); return interaction.reply({ content: '✅ Registros parados.', ...privateReply() }); }
+  if (interaction.commandName === 'parar-registro') { stopRegistration(); return interaction.reply({ content: '✅ Parado.', ...privateReply() }); }
 });
-
-discordClient.on(Events.Error, error => console.error('❌ Erro Discord:', error));
 
 function startHeartbeat() {
   if (heartbeatInterval) clearInterval(heartbeatInterval);
-  heartbeatInterval = setInterval(() => console.log(`💓 Bot ativo | Jogadores: ${playerNames().length}`), 30000);
-}
-
-async function shutdown(reason, exitCode = 0) {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  if (reconnectTimer) clearTimeout(reconnectTimer);
-  if (onlineInterval) clearInterval(onlineInterval);
-  if (registrationInterval) clearInterval(registrationInterval);
-  if (heartbeatInterval) clearInterval(heartbeatInterval);
-  try { mcClient?.close(); } catch (e) {}
-  try { discordClient.destroy(); } catch (e) {}
-  process.exit(exitCode);
+  heartbeatInterval = setInterval(() => console.log(`💓 Bot ativo | Jogadores: ${jogadoresOnline.size}`), 30000);
 }
 
 startHeartbeat();
-discordClient.login(CONFIG.DISCORD_TOKEN).catch(() => shutdown('falha no login', 1));
-process.on('uncaughtException', () => shutdown('uncaughtException', 1));
-process.on('unhandledRejection', () => shutdown('unhandledRejection', 1));
-process.on('SIGTERM', () => shutdown('SIGTERM recebido', 0));
-process.on('SIGINT', () => shutdown('SIGINT recebido', 0));
+discordClient.login(CONFIG.DISCORD_TOKEN).catch(() => process.exit(1));
+process.on('uncaughtException', () => {}); process.on('unhandledRejection', () => {});
