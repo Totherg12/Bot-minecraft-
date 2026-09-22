@@ -35,25 +35,20 @@ const CONFIG = {
 };
 
 app.get('/', (_req, res) => res.status(200).send('Bot online!'));
-app.listen(PORT, '0.0.0.0', () => console.log(`🌐 HTTP ativo na porta ${PORT}`));
+app.listen(PORT, '0.0.0.0', () => console.log(`🌐 Servidor HTTP ativo na porta ${PORT}`));
 
 const discordClient = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 // ============================================================
-// ESTADO E BANCO DE DADOS TEMPORÁRIO (REDE DE ARRASTÃO)
+// ESTADO E BANCO DE DADOS (MEMÓRIA INTOCÁVEL)
 // ============================================================
 
 const jogadoresOnline = new Map(); // Nome -> { uuid, entityId }
 
-// Placar Global
-const globalScoreIdentity = new Map(); // scoreboard_id -> entity_unique_id
-const globalScoreName = new Map();     // scoreboard_id -> custom_name (Nome fake)
-const scoresByObjective = new Map();   // objective_name -> Map<scoreboard_id, score>
-let listObjective = null;              // Qual o nome do placar que fica no menu de pausa
-
-// Hologramas físicos (Fallback)
-const temposPorHolograma = new Map();
-const runtimeToNames = new Map();
+// Mapas focados exclusivamente no objetivo "tempo"
+const rawScoresByName = new Map(); // custom_name (em minúsculas) -> score
+const idToScore = new Map();       // scoreboard_id -> score
+const idToEntity = new Map();      // scoreboard_id -> entity_unique_id
 
 let mcClient = null;
 let connecting = false;
@@ -79,12 +74,9 @@ function isAdmin(interaction) { return interaction.memberPermissions?.has(Permis
 
 function clearPlayers() {
   jogadoresOnline.clear();
-  globalScoreIdentity.clear();
-  globalScoreName.clear();
-  scoresByObjective.clear();
-  temposPorHolograma.clear();
-  runtimeToNames.clear();
-  listObjective = null;
+  rawScoresByName.clear();
+  idToScore.clear();
+  idToEntity.clear();
 }
 
 function extractString(val) {
@@ -127,45 +119,38 @@ function isRemoveRecord(packet, record) {
 }
 
 // ============================================================
-// CRUZAMENTO DE DADOS (ACHANDO O TEMPO DO JOGADOR)
+// CRUZAMENTO DE DADOS (EXTRATOR DE TEMPO INFALÍVEL)
 // ============================================================
 
 function getPlayerTime(playerName) {
-  const pData = jogadoresOnline.get(playerName);
-  const entId = pData ? pData.entityId : null;
+  const lowerName = playerName.toLowerCase();
 
-  // 1. Tenta buscar no Placar Global
-  // Se o servidor avisou que um dos placares é o "list" (menu de pausa), focamos nele.
-  const objectivesToCheck = listObjective ? [listObjective] : [...scoresByObjective.keys()];
-
-  for (const obj of objectivesToCheck) {
-    const scores = scoresByObjective.get(obj);
-    if (!scores) continue;
-
-    for (const [sId, score] of scores.entries()) {
-      // Método A: Verifica se o ID Físico da entidade bate
-      if (entId && globalScoreIdentity.get(sId) === entId) return score;
-
-      // Método B: Verifica se o servidor enviou o nome no placar
-      const cName = globalScoreName.get(sId);
-      if (cName && cName.toLowerCase().includes(playerName.toLowerCase())) return score;
-    }
+  // 1. Tenta pelo nome direto (se o servidor usar Fake Players no placar)
+  if (rawScoresByName.has(lowerName)) {
+    return rawScoresByName.get(lowerName);
   }
 
-  // 2. Fallback: Se o jogador estiver perto do bot e tiver holograma
-  if (temposPorHolograma.has(playerName)) {
-    return temposPorHolograma.get(playerName);
+  // 2. Tenta cruzar o ID da Entidade (se o servidor usar Jogadores Reais no placar)
+  const pData = jogadoresOnline.get(playerName);
+  if (pData && pData.entityId) {
+    const entId = pData.entityId;
+    
+    for (const [sId, storedEntId] of idToEntity.entries()) {
+      if (storedEntId === entId && idToScore.has(sId)) {
+        return idToScore.get(sId);
+      }
+    }
   }
 
   return undefined;
 }
 
 // ============================================================
-// GERAÇÃO DOS EMBEDS (MENSAGENS)
+// GERAÇÃO DOS EMBEDS (MENSAGENS DO DISCORD)
 // ============================================================
 
 function getPlayerListString() {
-  const names = [...jogadoresOnline.keys()].sort((a, b) => a.localeCompare(b, 'pt-BR'));
+  const names = [...jogadoresOnline.keys()].sort((a, b) => a.localeCompare(b, 'pt-PT'));
   if (!names.length) return 'Nenhum jogador online.';
 
   let list = names.map(name => {
@@ -196,17 +181,17 @@ function onlineEmbed() {
 
 function registrationEmbed() {
   const list = getPlayerListString();
-  const time = new Intl.DateTimeFormat('pt-BR', { timeZone: 'America/Sao_Paulo', dateStyle: 'short', timeStyle: 'medium' }).format(new Date());
+  const time = new Intl.DateTimeFormat('pt-PT', { timeZone: 'Europe/Lisbon', dateStyle: 'short', timeStyle: 'medium' }).format(new Date());
 
   return new EmbedBuilder()
     .setColor('#3498DB')
-    .setTitle('📋 Registro de jogadores online')
+    .setTitle('📋 Registo de jogadores online')
     .addFields(
       { name: '👥 Total', value: String(jogadoresOnline.size), inline: true },
       { name: '🕒 Horário', value: time, inline: true },
       { name: '📜 Jogadores', value: list }
     )
-    .setFooter({ text: 'Novo registro a cada 45 segundos' })
+    .setFooter({ text: 'Novo registo a cada 45 segundos' })
     .setTimestamp();
 }
 
@@ -310,11 +295,7 @@ function connectBedrock() {
       username: CONFIG.MC_USERNAME,
       version: CONFIG.MC_VERSION,
       offline: CONFIG.MC_OFFLINE,
-      connectTimeout: 15000,
-      onMsaCode: data => {
-        console.log(`🌐 Acesse: ${data.verification_uri}`);
-        console.log(`🔑 Código: ${data.user_code}`);
-      }
+      connectTimeout: 15000
     });
 
     mcClient = client;
@@ -322,48 +303,30 @@ function connectBedrock() {
     client.on('join', () => { connecting = false; console.log('✅ Bot entrou no servidor Bedrock.'); });
     client.on('player_list', packet => processPlayerList(packet));
 
-    // 🎯 Captura a criação de objetivos no Placar
-    client.on('set_display_objective', packet => {
-      console.log(`[DEBUG PLACAR] Servidor enviou objetivo: Slot '${packet.display_slot}' -> Nome '${packet.objective_name}'`);
-      if (packet.display_slot === 'list') listObjective = packet.objective_name;
-    });
-
-    // 🎯 Captura TODOS os valores de placar enviados
+    // 🎯 Captura e armazena os valores focando exclusivamente no objetivo 'tempo'
     client.on('set_score', packet => {
       if (packet.action !== 0) return;
       for (const entry of packet.entries) {
-        const obj = entry.objective_name;
-        if (!scoresByObjective.has(obj)) scoresByObjective.set(obj, new Map());
-        scoresByObjective.get(obj).set(String(entry.scoreboard_id), entry.score);
+        // Ignora qualquer placar que não seja o de tempo
+        if (entry.objective_name !== 'tempo') continue;
+
+        const sId = String(entry.scoreboard_id);
+        idToScore.set(sId, entry.score);
 
         if (entry.identity_type === 3 && entry.custom_name) {
-          globalScoreName.set(String(entry.scoreboard_id), stripColors(extractString(entry.custom_name)));
+          rawScoresByName.set(stripColors(extractString(entry.custom_name)).toLowerCase(), entry.score);
         } else if (entry.entity_unique_id != null) {
-          globalScoreIdentity.set(String(entry.scoreboard_id), String(entry.entity_unique_id));
+          idToEntity.set(sId, String(entry.entity_unique_id));
         }
       }
     });
 
-    // 🎯 Captura mapeamento de Identidades do Placar
+    // 🎯 Captura mapeamento extra de identidades do Placar
     client.on('set_scoreboard_identity', packet => {
       if (packet.action !== 0) return;
       for (const entry of packet.entries) {
         if (entry.scoreboard_id != null && entry.entity_unique_id != null) {
-          globalScoreIdentity.set(String(entry.scoreboard_id), String(entry.entity_unique_id));
-        }
-      }
-    });
-
-    // Fallback: Lendo hologramas na cabeça (se o bot vir alguém)
-    client.on('add_player', packet => {
-      const name = extractString(packet.username);
-      if (name && packet.runtime_id) runtimeToNames.set(String(packet.runtime_id), name);
-      if (name && packet.metadata) {
-        for (const item of packet.metadata) {
-          if (item.key === 4 || item.key === 'nametag') {
-             const match = stripColors(extractString(item.value)).match(/([\d.,]+)\s*TEMPO/i);
-             if (match) temposPorHolograma.set(name, match[1]);
-          }
+          idToEntity.set(String(entry.scoreboard_id), String(entry.entity_unique_id));
         }
       }
     });
@@ -383,12 +346,12 @@ const commands = [
   new SlashCommandBuilder().setName('online').setDescription('Mostra os jogadores online'),
   new SlashCommandBuilder().setName('configurar-online').setDescription('Escolhe o canal do status').addChannelOption(opt => opt.setName('canal').setDescription('Canal').addChannelTypes(ChannelType.GuildText).setRequired(true)),
   new SlashCommandBuilder().setName('parar-online').setDescription('Para o status'),
-  new SlashCommandBuilder().setName('configurar-registro').setDescription('Escolhe o canal dos registros').addChannelOption(opt => opt.setName('canal').setDescription('Canal').addChannelTypes(ChannelType.GuildText).setRequired(true)),
-  new SlashCommandBuilder().setName('parar-registro').setDescription('Para os registros')
+  new SlashCommandBuilder().setName('configurar-registro').setDescription('Escolhe o canal dos registos').addChannelOption(opt => opt.setName('canal').setDescription('Canal').addChannelTypes(ChannelType.GuildText).setRequired(true)),
+  new SlashCommandBuilder().setName('parar-registro').setDescription('Para os registos')
 ].map(command => command.setDefaultMemberPermissions(PermissionFlagsBits.Administrator.toString()).toJSON());
 
 discordClient.once(Events.ClientReady, async client => {
-  console.log(`🤖 Discord conectado como ${client.user.tag}`);
+  console.log(`🤖 Discord ligado como ${client.user.tag}`);
   try {
     await new REST({ version: '10' }).setToken(CONFIG.DISCORD_TOKEN).put(Routes.applicationCommands(CONFIG.CLIENT_ID), { body: commands });
     connectBedrock();
@@ -409,7 +372,7 @@ discordClient.on(Events.InteractionCreate, async interaction => {
   if (interaction.commandName === 'parar-online') { stopOnlineUpdates(); return interaction.reply({ content: '✅ Parado.', ...privateReply() }); }
   if (interaction.commandName === 'configurar-registro') {
     registrationChannelId = interaction.options.getChannel('canal').id; startRegistration();
-    return interaction.reply({ content: `✅ Registros configurados.`, ...privateReply() });
+    return interaction.reply({ content: `✅ Registos configurados.`, ...privateReply() });
   }
   if (interaction.commandName === 'parar-registro') { stopRegistration(); return interaction.reply({ content: '✅ Parado.', ...privateReply() }); }
 });
