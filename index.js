@@ -59,6 +59,7 @@ let connecting = false;
 let reconnectTimer = null;
 let shuttingDown = false;
 let heartbeatInterval = null;
+let connectionWatchdog = null;
 
 let onlineChannelId = CONFIG.ONLINE_CHANNEL_ID;
 let onlineMessageId = null;
@@ -327,33 +328,6 @@ function stopRegistration() {
 // BEDROCK: RECONEXÃO
 // ============================================================
 
-function scheduleReconnect() {
-  if (shuttingDown || reconnectTimer) return;
-
-  console.log(`🔄 Nova tentativa Bedrock em ${RECONNECT_DELAY / 1000}s...`);
-  reconnectTimer = setTimeout(() => {
-    reconnectTimer = null;
-    connectBedrock();
-  }, RECONNECT_DELAY);
-}
-
-function connectBedrock() {
-  if (shuttingDown || connecting) return;
-  connecting = true;
-
-  console.log(`🔄 Conectando a ${CONFIG.MC_HOST}:${CONFIG.MC_PORT} (${CONFIG.MC_VERSION})...`);
-
-  let client;
-  try {
-    client = bedrock.createClient({
-      host: CONFIG.MC_HOST,
-      port: CONFIG.MC_PORT,
-      username: CONFIG.MC_USERNAME,
-
-// ============================================================
-// BEDROCK: RECONEXÃO
-// ============================================================
-
 const CONNECTION_WATCHDOG = 30000;
 
 function clearConnectionWatchdog() {
@@ -392,7 +366,7 @@ function handleBedrockClosed(client, reason) {
   // Atualiza imediatamente o Discord para mostrar 0 jogadores
   updateOnlineMessage();
 
-  // Agenda uma nova tentativa, mesmo que não tenha ocorrido o evento "close"
+  // Agenda nova tentativa mesmo quando o protocolo não emite "close"
   scheduleReconnect();
 }
 
@@ -492,7 +466,7 @@ function connectBedrock() {
         handleBedrockClosed(client, 'erro durante a conexão');
       }
 
-      // Depois de conectado, o evento "close" continua sendo o responsável
+      // Depois de conectado, o evento "close" continua responsável
       // pela reconexão normal.
     });
 
@@ -627,6 +601,8 @@ async function shutdown(reason, exitCode = 0) {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
   }
+
+  clearConnectionWatchdog();
 
   if (onlineInterval) clearInterval(onlineInterval);
   if (registrationInterval) clearInterval(registrationInterval);
