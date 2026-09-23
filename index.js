@@ -125,12 +125,12 @@ function isRemoveRecord(packet, record) {
 function getPlayerTime(playerName) {
   const lowerName = playerName.toLowerCase();
 
-  // 1. Tenta pelo nome direto (se o servidor usar Fake Players no placar)
+  // 1. Tenta pelo nome direto
   if (rawScoresByName.has(lowerName)) {
     return rawScoresByName.get(lowerName);
   }
 
-  // 2. Tenta cruzar o ID da Entidade (se o servidor usar Jogadores Reais no placar)
+  // 2. Tenta cruzar o ID da Entidade
   const pData = jogadoresOnline.get(playerName);
   if (pData && pData.entityId) {
     const entId = pData.entityId;
@@ -150,7 +150,7 @@ function getPlayerTime(playerName) {
 // ============================================================
 
 function getPlayerListString() {
-  const names = [...jogadoresOnline.keys()].sort((a, b) => a.localeCompare(b, 'pt-PT'));
+  const names = [...jogadoresOnline.keys()].sort((a, b) => a.localeCompare(b, 'pt-BR'));
   if (!names.length) return 'Nenhum jogador online.';
 
   let list = names.map(name => {
@@ -181,17 +181,17 @@ function onlineEmbed() {
 
 function registrationEmbed() {
   const list = getPlayerListString();
-  const time = new Intl.DateTimeFormat('pt-PT', { timeZone: 'Europe/Lisbon', dateStyle: 'short', timeStyle: 'medium' }).format(new Date());
+  const time = new Intl.DateTimeFormat('pt-BR', { timeZone: 'America/Sao_Paulo', dateStyle: 'short', timeStyle: 'medium' }).format(new Date());
 
   return new EmbedBuilder()
     .setColor('#3498DB')
-    .setTitle('📋 Registo de jogadores online')
+    .setTitle('📋 Registro de jogadores online')
     .addFields(
       { name: '👥 Total', value: String(jogadoresOnline.size), inline: true },
       { name: '🕒 Horário', value: time, inline: true },
       { name: '📜 Jogadores', value: list }
     )
-    .setFooter({ text: 'Novo registo a cada 45 segundos' })
+    .setFooter({ text: 'Novo registro a cada 45 segundos' })
     .setTimestamp();
 }
 
@@ -280,7 +280,12 @@ function processPlayerList(packet) {
 
 function scheduleReconnect() {
   if (shuttingDown || reconnectTimer) return;
-  reconnectTimer = setTimeout(() => { reconnectTimer = null; connectBedrock(); }, RECONNECT_DELAY);
+  console.log(`🔄 Tentando reconectar ao Bedrock em ${RECONNECT_DELAY / 1000}s...`);
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    connecting = false;
+    connectBedrock();
+  }, RECONNECT_DELAY);
 }
 
 function connectBedrock() {
@@ -295,19 +300,22 @@ function connectBedrock() {
       username: CONFIG.MC_USERNAME,
       version: CONFIG.MC_VERSION,
       offline: CONFIG.MC_OFFLINE,
-      connectTimeout: 15000
+      connectTimeout: 10000
     });
 
     mcClient = client;
 
-    client.on('join', () => { connecting = false; console.log('✅ Bot entrou no servidor Bedrock.'); });
+    client.on('join', () => {
+      connecting = false;
+      console.log('✅ Bot entrou no servidor Bedrock.');
+    });
+
     client.on('player_list', packet => processPlayerList(packet));
 
     // 🎯 Captura e armazena os valores focando exclusivamente no objetivo 'tempo'
     client.on('set_score', packet => {
       if (packet.action !== 0) return;
       for (const entry of packet.entries) {
-        // Ignora qualquer placar que não seja o de tempo
         if (entry.objective_name !== 'tempo') continue;
 
         const sId = String(entry.scoreboard_id);
@@ -331,10 +339,28 @@ function connectBedrock() {
       }
     });
 
-    client.on('error', error => { if (!error?.partialReadError) console.error('⚠️ Erro Bedrock:', error.message); });
-    client.on('close', () => { connecting = false; if (mcClient === client) { mcClient = null; clearPlayers(); } scheduleReconnect(); });
+    // BLINDAGEM DE ERROS (solta a trava e força o fechamento)
+    client.on('error', error => {
+      if (!error?.partialReadError) console.error('⚠️ Erro Bedrock:', error.message);
+      connecting = false;
+      try { client.close(); } catch (e) {}
+    });
+
+    // BLINDAGEM DE DESCONEXÃO (reseta o estado e agenda reconexão contínua)
+    client.on('close', () => {
+      connecting = false;
+      if (mcClient === client) {
+        mcClient = null;
+        clearPlayers();
+        updateOnlineMessage();
+      }
+      scheduleReconnect();
+    });
+
   } catch (error) {
-    connecting = false; mcClient = null; scheduleReconnect();
+    connecting = false;
+    mcClient = null;
+    scheduleReconnect();
   }
 }
 
@@ -346,8 +372,8 @@ const commands = [
   new SlashCommandBuilder().setName('online').setDescription('Mostra os jogadores online'),
   new SlashCommandBuilder().setName('configurar-online').setDescription('Escolhe o canal do status').addChannelOption(opt => opt.setName('canal').setDescription('Canal').addChannelTypes(ChannelType.GuildText).setRequired(true)),
   new SlashCommandBuilder().setName('parar-online').setDescription('Para o status'),
-  new SlashCommandBuilder().setName('configurar-registro').setDescription('Escolhe o canal dos registos').addChannelOption(opt => opt.setName('canal').setDescription('Canal').addChannelTypes(ChannelType.GuildText).setRequired(true)),
-  new SlashCommandBuilder().setName('parar-registro').setDescription('Para os registos')
+  new SlashCommandBuilder().setName('configurar-registro').setDescription('Escolhe o canal dos registros').addChannelOption(opt => opt.setName('canal').setDescription('Canal').addChannelTypes(ChannelType.GuildText).setRequired(true)),
+  new SlashCommandBuilder().setName('parar-registro').setDescription('Para os registros')
 ].map(command => command.setDefaultMemberPermissions(PermissionFlagsBits.Administrator.toString()).toJSON());
 
 discordClient.once(Events.ClientReady, async client => {
@@ -372,7 +398,7 @@ discordClient.on(Events.InteractionCreate, async interaction => {
   if (interaction.commandName === 'parar-online') { stopOnlineUpdates(); return interaction.reply({ content: '✅ Parado.', ...privateReply() }); }
   if (interaction.commandName === 'configurar-registro') {
     registrationChannelId = interaction.options.getChannel('canal').id; startRegistration();
-    return interaction.reply({ content: `✅ Registos configurados.`, ...privateReply() });
+    return interaction.reply({ content: `✅ Registros configurados.`, ...privateReply() });
   }
   if (interaction.commandName === 'parar-registro') { stopRegistration(); return interaction.reply({ content: '✅ Parado.', ...privateReply() }); }
 });
