@@ -349,10 +349,75 @@ function connectBedrock() {
       host: CONFIG.MC_HOST,
       port: CONFIG.MC_PORT,
       username: CONFIG.MC_USERNAME,
+
+// ============================================================
+// BEDROCK: RECONEXÃO
+// ============================================================
+
+const CONNECTION_WATCHDOG = 30000;
+
+function clearConnectionWatchdog() {
+  if (connectionWatchdog) {
+    clearTimeout(connectionWatchdog);
+    connectionWatchdog = null;
+  }
+}
+
+function scheduleReconnect() {
+  if (shuttingDown || reconnectTimer) return;
+
+  console.log(`🔄 Nova tentativa Bedrock em ${RECONNECT_DELAY / 1000}s...`);
+
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+
+    if (!shuttingDown) {
+      connectBedrock();
+    }
+  }, RECONNECT_DELAY);
+}
+
+function handleBedrockClosed(client, reason) {
+  // Ignora eventos de uma conexão antiga
+  if (mcClient !== client) return;
+
+  clearConnectionWatchdog();
+
+  connecting = false;
+  mcClient = null;
+  clearPlayers();
+
+  console.error('🔌 Conexão Bedrock encerrada:', safeStringify(reason));
+
+  // Atualiza imediatamente o Discord para mostrar 0 jogadores
+  updateOnlineMessage();
+
+  // Agenda uma nova tentativa, mesmo que não tenha ocorrido o evento "close"
+  scheduleReconnect();
+}
+
+function connectBedrock() {
+  if (shuttingDown || connecting) return;
+
+  connecting = true;
+
+  console.log(
+    `🔄 Conectando a ${CONFIG.MC_HOST}:${CONFIG.MC_PORT} ` +
+    `(${CONFIG.MC_VERSION})...`
+  );
+
+  let client;
+
+  try {
+    client = bedrock.createClient({
+      host: CONFIG.MC_HOST,
+      port: CONFIG.MC_PORT,
+      username: CONFIG.MC_USERNAME,
       version: CONFIG.MC_VERSION,
       offline: CONFIG.MC_OFFLINE,
       connectTimeout: 15000,
       conLog: console.log,
+
       onMsaCode: data => {
         console.log('🔐 Autenticação Microsoft necessária.');
         console.log(`🌐 Acesse: ${data.verification_uri}`);
@@ -362,44 +427,87 @@ function connectBedrock() {
 
     mcClient = client;
 
-    client.on('connect_allowed', () => console.log('✅ RakNet permitido.'));
+    /*
+     * Alguns erros de conexão não geram "close".
+     * Este watchdog impede que "connecting" fique travado para sempre.
+     */
+    clearConnectionWatchdog();
+
+    connectionWatchdog = setTimeout(() => {
+      if (mcClient === client && connecting) {
+        console.error(
+          `⏱️ Timeout ao conectar ao Bedrock após ` +
+          `${CONNECTION_WATCHDOG / 1000}s.`
+        );
+
+        handleBedrockClosed(client, 'timeout de conexão');
+      }
+    }, CONNECTION_WATCHDOG);
+
+    client.on('connect_allowed', () => {
+      console.log('✅ RakNet permitido.');
+    });
+
     client.on('join', () => {
       connecting = false;
+      clearConnectionWatchdog();
       console.log('✅ Bot entrou no servidor Bedrock.');
     });
+
     client.on('spawn', () => {
       connecting = false;
+      clearConnectionWatchdog();
       console.log('✅ Bot apareceu no mundo.');
     });
+
     client.on('player_list', packet => {
       console.log('📋 player_list recebido.');
       processPlayerList(packet);
     });
-    client.on('kick', packet => console.error('🚫 Bot expulso:', safeStringify(packet)));
-    client.on('disconnect', packet => console.error('🚫 Desconexão enviada pelo servidor:', safeStringify(packet)));
+
+    client.on('kick', packet => {
+      console.error('🚫 Bot expulso:', safeStringify(packet));
+    });
+
+    client.on('disconnect', packet => {
+      console.error(
+        '🚫 Desconexão enviada pelo servidor:',
+        safeStringify(packet)
+      );
+    });
 
     client.on('error', error => {
       if (error?.partialReadError) {
         console.warn('⚠️ Pacote incompatível ignorado:', error.message);
         return;
       }
+
       console.error('⚠️ Erro Bedrock:', error);
-      // O evento close controla a reconexão; não abrimos outra conexão aqui.
+
+      /*
+       * Se o erro ocorreu antes de join/spawn, a conexão pode ficar
+       * pendurada sem emitir "close". Libera o estado e reconecta.
+       */
+      if (connecting) {
+        handleBedrockClosed(client, 'erro durante a conexão');
+      }
+
+      // Depois de conectado, o evento "close" continua sendo o responsável
+      // pela reconexão normal.
     });
 
     client.on('close', reason => {
-      console.error('🔌 Conexão Bedrock fechada:', safeStringify(reason));
-      connecting = false;
-      if (mcClient === client) {
-        mcClient = null;
-        clearPlayers();
-      }
-      scheduleReconnect();
+      handleBedrockClosed(client, reason);
     });
+
   } catch (error) {
+    clearConnectionWatchdog();
+
     connecting = false;
     mcClient = null;
+
     console.error('❌ Falha ao criar cliente Bedrock:', error);
+
     scheduleReconnect();
   }
 }
