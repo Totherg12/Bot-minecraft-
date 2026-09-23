@@ -432,6 +432,8 @@ function connectBedrock() {
 
   connecting = true;
   const attemptId = ++connectionAttemptId;
+  let microsoftAuthPending = !CONFIG.MC_OFFLINE;
+  let lastMsaCode = null;
 
   console.log(
     `🔄 Conectando a ${CONFIG.MC_HOST}:${CONFIG.MC_PORT} ` +
@@ -447,34 +449,55 @@ function connectBedrock() {
       username: CONFIG.MC_USERNAME,
       version: CONFIG.MC_VERSION,
       offline: CONFIG.MC_OFFLINE,
+      profilesFolder: process.env.MC_PROFILES_FOLDER || './auth-cache',
+
+      // Este timeout vale para o transporte Bedrock, não para o login Microsoft.
       connectTimeout: 15000,
       conLog: console.log,
 
       onMsaCode: data => {
+        // Não repete o mesmo código caso a biblioteca o emita novamente.
+        if (data.user_code === lastMsaCode) return;
+        lastMsaCode = data.user_code;
+        microsoftAuthPending = true;
+
+        console.log('');
         console.log('🔐 Autenticação Microsoft necessária.');
         console.log(`🌐 Acesse: ${data.verification_uri}`);
         console.log(`🔑 Código: ${data.user_code}`);
+        console.log(
+          '⏳ Use este código imediatamente. Ele expira aproximadamente ' +
+          '15 minutos após ser gerado.'
+        );
+        console.log('');
       }
     });
 
     mcClient = client;
 
-    /*
-     * Alguns erros de conexão não geram "close".
-     * Este watchdog impede que "connecting" fique travado para sempre.
-     */
+    const armConnectionWatchdog = () => {
+      clearConnectionWatchdog();
+
+      connectionWatchdog = setTimeout(() => {
+        if (mcClient === client && connecting && !microsoftAuthPending) {
+          console.error(
+            `⏱️ Timeout ao conectar ao Bedrock após ` +
+            `${CONNECTION_WATCHDOG / 1000}s.`
+          );
+
+          handleBedrockClosed(client, 'timeout de conexão', true);
+        }
+      }, CONNECTION_WATCHDOG);
+    };
+
+    // Não iniciar o watchdog durante a autenticação Microsoft.
     clearConnectionWatchdog();
 
-    connectionWatchdog = setTimeout(() => {
-      if (mcClient === client && connecting) {
-        console.error(
-          `⏱️ Timeout ao conectar ao Bedrock após ` +
-          `${CONNECTION_WATCHDOG / 1000}s.`
-        );
-
-        handleBedrockClosed(client, 'timeout de conexão', true);
-      }
-    }, CONNECTION_WATCHDOG);
+    client.once('session', () => {
+      // O token Microsoft foi obtido; agora começa o prazo do transporte.
+      microsoftAuthPending = false;
+      armConnectionWatchdog();
+    });
 
     client.on('connect_allowed', () => {
       console.log('✅ RakNet permitido.');
@@ -482,12 +505,14 @@ function connectBedrock() {
 
     client.on('join', () => {
       connecting = false;
+      microsoftAuthPending = false;
       clearConnectionWatchdog();
       console.log('✅ Bot entrou no servidor Bedrock.');
     });
 
     client.on('spawn', () => {
       connecting = false;
+      microsoftAuthPending = false;
       clearConnectionWatchdog();
       console.log('✅ Bot apareceu no mundo.');
     });
@@ -519,18 +544,26 @@ function connectBedrock() {
         return;
       }
 
+      const errorText = String(error?.message || error);
+
+      if (microsoftAuthPending) {
+        console.error('⚠️ Erro durante a autenticação Microsoft:', errorText);
+        console.error(
+          'A tentativa atual será encerrada pela biblioteca; ' +
+          'não será criada outra enquanto este login estiver ativo.'
+        );
+        return;
+      }
+
       console.error('⚠️ Erro Bedrock:', error);
 
       /*
-       * Se o erro ocorreu antes de join/spawn, a conexão pode ficar
-       * pendurada sem emitir "close". Libera o estado e reconecta.
+       * Se o erro ocorreu depois da autenticação, libera o estado e reconecta.
+       * Durante o login Microsoft, o evento error não cria outra tentativa.
        */
       if (connecting) {
         handleBedrockClosed(client, 'erro durante a conexão', true);
       }
-
-      // Depois de conectado, o evento "close" continua responsável
-      // pela reconexão normal.
     });
 
     client.on('close', reason => {
@@ -539,7 +572,6 @@ function connectBedrock() {
         handleBedrockClosed(client, reason);
       }
     });
-
   } catch (error) {
     clearConnectionWatchdog();
 
@@ -551,7 +583,6 @@ function connectBedrock() {
     scheduleReconnect();
   }
 }
-
 // ============================================================
 // COMANDOS
 // ============================================================
