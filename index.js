@@ -31,7 +31,8 @@ const CONFIG = {
   MC_VERSION: '1.26.51',
   MC_OFFLINE: false,
   ONLINE_CHANNEL_ID: process.env.ONLINE_CHANNEL_ID || null,
-  REGISTRATION_CHANNEL_ID: process.env.REGISTRATION_CHANNEL_ID || null
+  REGISTRATION_CHANNEL_ID: process.env.REGISTRATION_CHANNEL_ID || null,
+  CHAT_CHANNEL_ID: process.env.CHAT_CHANNEL_ID || null
 };
 
 if (!CONFIG.DISCORD_TOKEN || !CONFIG.CLIENT_ID) {
@@ -60,6 +61,7 @@ let reconnectTimer = null;
 let shuttingDown = false;
 let heartbeatInterval = null;
 let connectionWatchdog = null;
+let connectionAttemptId = 0;
 
 let onlineChannelId = CONFIG.ONLINE_CHANNEL_ID;
 let onlineMessageId = null;
@@ -69,6 +71,8 @@ let updatingOnlineMessage = false;
 let registrationChannelId = CONFIG.REGISTRATION_CHANNEL_ID;
 let registrationInterval = null;
 let sendingRegistration = false;
+
+let chatChannelId = CONFIG.CHAT_CHANNEL_ID;
 
 // ============================================================
 // UTILITÁRIOS (CORRIGIDOS)
@@ -325,6 +329,47 @@ function stopRegistration() {
 }
 
 // ============================================================
+// BEDROCK: CHAT -> DISCORD
+// ============================================================
+
+function chatText(packet) {
+  const message = extractString(packet?.message ?? packet?.text ?? packet?.content);
+  if (!message || !message.trim()) return null;
+
+  const sender = extractString(
+    packet?.source_name ?? packet?.sourceName ?? packet?.sender ?? packet?.username
+  );
+  const type = extractString(packet?.type)?.toLowerCase();
+
+  // Mensagens normais têm remetente. Para avisos do servidor, preserva o texto.
+  if (sender && sender !== '[object Object]') return `**${sender}**: ${message.trim()}`;
+  if (type?.includes('whisper') && packet?.source_name) {
+    return `**${extractString(packet.source_name)}**: ${message.trim()}`;
+  }
+  return `**Servidor**: ${message.trim()}`;
+}
+
+async function forwardMinecraftChat(packet) {
+  if (!chatChannelId || !discordClient.isReady()) return;
+
+  const content = chatText(packet);
+  if (!content) return;
+
+  try {
+    const channel = await discordClient.channels.fetch(chatChannelId);
+    if (!channel || !channel.isTextBased()) {
+      console.error('❌ Canal de chat inválido.');
+      return;
+    }
+
+    // Limita o tamanho para respeitar o limite de mensagem do Discord.
+    await channel.send({ content: `🎮 ${content}`.slice(0, 2000) });
+  } catch (error) {
+    console.error('❌ Erro ao encaminhar chat do Minecraft:', error.message);
+  }
+}
+
+// ============================================================
 // BEDROCK: RECONEXÃO
 // ============================================================
 
@@ -351,11 +396,23 @@ function scheduleReconnect() {
   }, RECONNECT_DELAY);
 }
 
-function handleBedrockClosed(client, reason) {
-  // Ignora eventos de uma conexão antiga
+function handleBedrockClosed(client, reason, destroyClient = false) {
+  // Ignora eventos atrasados de uma conexão antiga
   if (mcClient !== client) return;
 
   clearConnectionWatchdog();
+
+  // Impede que a tentativa antiga continue viva quando houver timeout/erro.
+  // Sem isso, ela pode entrar no servidor depois que a nova tentativa já abriu,
+  // causando o erro server_id_conflict.
+  if (destroyClient) {
+    try {
+      client.removeAllListeners();
+      client.close();
+    } catch (error) {
+      console.warn('⚠️ Erro ao fechar tentativa antiga:', error.message);
+    }
+  }
 
   connecting = false;
   mcClient = null;
@@ -374,6 +431,7 @@ function connectBedrock() {
   if (shuttingDown || connecting) return;
 
   connecting = true;
+  const attemptId = ++connectionAttemptId;
 
   console.log(
     `🔄 Conectando a ${CONFIG.MC_HOST}:${CONFIG.MC_PORT} ` +
@@ -414,7 +472,7 @@ function connectBedrock() {
           `${CONNECTION_WATCHDOG / 1000}s.`
         );
 
-        handleBedrockClosed(client, 'timeout de conexão');
+        handleBedrockClosed(client, 'timeout de conexão', true);
       }
     }, CONNECTION_WATCHDOG);
 
@@ -437,6 +495,11 @@ function connectBedrock() {
     client.on('player_list', packet => {
       console.log('📋 player_list recebido.');
       processPlayerList(packet);
+    });
+
+    client.on('text', packet => {
+      console.log('💬 Chat recebido:', safeStringify(packet));
+      forwardMinecraftChat(packet);
     });
 
     client.on('kick', packet => {
@@ -463,7 +526,7 @@ function connectBedrock() {
        * pendurada sem emitir "close". Libera o estado e reconecta.
        */
       if (connecting) {
-        handleBedrockClosed(client, 'erro durante a conexão');
+        handleBedrockClosed(client, 'erro durante a conexão', true);
       }
 
       // Depois de conectado, o evento "close" continua responsável
@@ -471,7 +534,10 @@ function connectBedrock() {
     });
 
     client.on('close', reason => {
-      handleBedrockClosed(client, reason);
+      // Somente a tentativa atual pode alterar o estado e reconectar.
+      if (attemptId === connectionAttemptId) {
+        handleBedrockClosed(client, reason);
+      }
     });
 
   } catch (error) {
@@ -499,7 +565,24 @@ const commands = [
   new SlashCommandBuilder()
     .setName('configurar-registro').setDescription('Escolhe o canal dos registros')
     .addChannelOption(option => option.setName('canal').setDescription('Canal de registros').addChannelTypes(ChannelType.GuildText).setRequired(true)),
-  new SlashCommandBuilder().setName('parar-registro').setDescription('Para os registros')
+  new SlashCommandBuilder().setName('parar-registro').setDescription('Para os registros'),
+  new SlashCommandBuilder()
+    .setName('configurar')
+    .setDescription('Configura os canais do bot')
+    .addSubcommand(subcommand => subcommand
+      .setName('chat')
+      .setDescription('Escolhe o canal que receberá o chat do Minecraft')
+      .addChannelOption(option => option
+        .setName('canal')
+        .setDescription('Canal do chat do Minecraft')
+        .addChannelTypes(ChannelType.GuildText)
+        .setRequired(true))),
+  new SlashCommandBuilder()
+    .setName('parar')
+    .setDescription('Desativa uma integração do bot')
+    .addSubcommand(subcommand => subcommand
+      .setName('chat')
+      .setDescription('Para o encaminhamento do chat do Minecraft'))
 ].map(command => command.setDefaultMemberPermissions(PermissionFlagsBits.Administrator.toString()).toJSON());
 
 async function registerCommands() {
@@ -568,6 +651,22 @@ discordClient.on(Events.InteractionCreate, async interaction => {
   if (interaction.commandName === 'parar-registro') {
     stopRegistration();
     await interaction.reply({ content: '✅ Registros parados.', ...privateReply() });
+    return;
+  }
+
+  if (interaction.commandName === 'configurar' && interaction.options.getSubcommand() === 'chat') {
+    const channel = interaction.options.getChannel('canal');
+    chatChannelId = channel.id;
+    await interaction.reply({
+      content: `✅ Chat do Minecraft configurado em ${channel}. As próximas mensagens serão encaminhadas para lá.`,
+      ...privateReply()
+    });
+    return;
+  }
+
+  if (interaction.commandName === 'parar' && interaction.options.getSubcommand() === 'chat') {
+    chatChannelId = null;
+    await interaction.reply({ content: '✅ Encaminhamento do chat parado.', ...privateReply() });
   }
 });
 
