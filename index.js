@@ -60,6 +60,7 @@ let reconnectTimer = null;
 let shuttingDown = false;
 let heartbeatInterval = null;
 let connectionWatchdog = null;
+let connectionAttemptId = 0;
 
 let onlineChannelId = CONFIG.ONLINE_CHANNEL_ID;
 let onlineMessageId = null;
@@ -351,11 +352,23 @@ function scheduleReconnect() {
   }, RECONNECT_DELAY);
 }
 
-function handleBedrockClosed(client, reason) {
-  // Ignora eventos de uma conexão antiga
+function handleBedrockClosed(client, reason, destroyClient = false) {
+  // Ignora eventos atrasados de uma conexão antiga
   if (mcClient !== client) return;
 
   clearConnectionWatchdog();
+
+  // Impede que a tentativa antiga continue viva quando houver timeout/erro.
+  // Sem isso, ela pode entrar no servidor depois que a nova tentativa já abriu,
+  // causando o erro server_id_conflict.
+  if (destroyClient) {
+    try {
+      client.removeAllListeners();
+      client.close();
+    } catch (error) {
+      console.warn('⚠️ Erro ao fechar tentativa antiga:', error.message);
+    }
+  }
 
   connecting = false;
   mcClient = null;
@@ -374,6 +387,7 @@ function connectBedrock() {
   if (shuttingDown || connecting) return;
 
   connecting = true;
+  const attemptId = ++connectionAttemptId;
 
   console.log(
     `🔄 Conectando a ${CONFIG.MC_HOST}:${CONFIG.MC_PORT} ` +
@@ -414,7 +428,7 @@ function connectBedrock() {
           `${CONNECTION_WATCHDOG / 1000}s.`
         );
 
-        handleBedrockClosed(client, 'timeout de conexão');
+        handleBedrockClosed(client, 'timeout de conexão', true);
       }
     }, CONNECTION_WATCHDOG);
 
@@ -463,7 +477,7 @@ function connectBedrock() {
        * pendurada sem emitir "close". Libera o estado e reconecta.
        */
       if (connecting) {
-        handleBedrockClosed(client, 'erro durante a conexão');
+        handleBedrockClosed(client, 'erro durante a conexão', true);
       }
 
       // Depois de conectado, o evento "close" continua responsável
@@ -471,7 +485,10 @@ function connectBedrock() {
     });
 
     client.on('close', reason => {
-      handleBedrockClosed(client, reason);
+      // Somente a tentativa atual pode alterar o estado e reconectar.
+      if (attemptId === connectionAttemptId) {
+        handleBedrockClosed(client, reason);
+      }
     });
 
   } catch (error) {
