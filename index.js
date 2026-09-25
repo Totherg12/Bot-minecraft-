@@ -58,6 +58,7 @@ const jogadoresOnline = new Map();
 let mcClient = null;
 let connecting = false;
 let reconnectTimer = null;
+let bedrockStarted = false;
 let shuttingDown = false;
 let heartbeatInterval = null;
 let connectionWatchdog = null;
@@ -616,6 +617,14 @@ const commands = [
       .setDescription('Para o encaminhamento do chat do Minecraft'))
 ].map(command => command.setDefaultMemberPermissions(PermissionFlagsBits.Administrator.toString()).toJSON());
 
+function startBedrockOnce() {
+  if (bedrockStarted || shuttingDown) return;
+
+  bedrockStarted = true;
+  console.log('🎮 Iniciando conexão Bedrock...');
+  connectBedrock();
+}
+
 async function registerCommands() {
   const rest = new REST({ version: '10' }).setToken(CONFIG.DISCORD_TOKEN);
   await rest.put(Routes.applicationCommands(CONFIG.CLIENT_ID), { body: commands });
@@ -624,13 +633,14 @@ async function registerCommands() {
 
 discordClient.once(Events.ClientReady, async client => {
   console.log(`🤖 Discord conectado como ${client.user.tag}`);
+
   try {
     await registerCommands();
-    connectBedrock();
+
     if (onlineChannelId) startOnlineUpdates();
     if (registrationChannelId) startRegistration();
   } catch (error) {
-    console.error('❌ Erro na inicialização:', error);
+    console.error('❌ Erro na inicialização do Discord:', error);
   }
 });
 
@@ -755,9 +765,16 @@ async function shutdown(reason, exitCode = 0) {
 
 startHeartbeat();
 
+// O login Microsoft do Minecraft não depende do Discord.
+// Assim, o link microsoft.com/link aparece mesmo se o Discord
+// estiver offline ou com problema de conexão.
+startBedrockOnce();
+
+console.log('🔐 Tentando conectar ao Discord...');
+
 discordClient.login(CONFIG.DISCORD_TOKEN).catch(error => {
   console.error('❌ Falha no login do Discord:', error);
-  shutdown('falha no login do Discord', 1);
+  // Não encerra o processo: o Minecraft pode continuar conectado.
 });
 
 process.on('uncaughtException', error => {
