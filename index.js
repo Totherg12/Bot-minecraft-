@@ -104,6 +104,8 @@ let connecting = false;
 let reconnectTimer = null;
 let bedrockStarted = false;
 let discordLoginTimeout = null;
+let discordReconnectTimer = null;
+let discordLoginAttempts = 0;
 let shuttingDown = false;
 let heartbeatInterval = null;
 let connectionWatchdog = null;
@@ -681,6 +683,11 @@ discordClient.once(Events.ClientReady, async client => {
     clearTimeout(discordLoginTimeout);
     discordLoginTimeout = null;
   }
+  if (discordReconnectTimer) {
+    clearTimeout(discordReconnectTimer);
+    discordReconnectTimer = null;
+  }
+  discordLoginAttempts = 0;
 
   console.log(`🤖 Discord conectado como ${client.user.tag}`);
 
@@ -791,6 +798,16 @@ async function shutdown(reason, exitCode = 0) {
     reconnectTimer = null;
   }
 
+  if (discordReconnectTimer) {
+    clearTimeout(discordReconnectTimer);
+    discordReconnectTimer = null;
+  }
+
+  if (discordLoginTimeout) {
+    clearTimeout(discordLoginTimeout);
+    discordLoginTimeout = null;
+  }
+
   clearConnectionWatchdog();
 
   if (onlineInterval) clearInterval(onlineInterval);
@@ -814,42 +831,81 @@ async function shutdown(reason, exitCode = 0) {
 
 startHeartbeat();
 
+function normalizedDiscordToken() {
+  return CONFIG.DISCORD_TOKEN.trim()
+    .replace(/^['"]|['"]$/g, '')
+    .replace(/^Bot\s+/i, '');
+}
+
+function scheduleDiscordLogin(reason) {
+  if (shuttingDown || discordClient.isReady() || discordReconnectTimer) return;
+
+  if (discordLoginTimeout) {
+    clearTimeout(discordLoginTimeout);
+    discordLoginTimeout = null;
+  }
+
+  console.error(`🔁 Reiniciando conexão do Gateway Discord: ${reason}`);
+
+  try {
+    discordClient.destroy();
+  } catch (error) {
+    console.warn('⚠️ Erro ao reiniciar o cliente Discord:', error.message);
+  }
+
+  const delay = Math.min(60000, 5000 * Math.max(1, discordLoginAttempts));
+  discordReconnectTimer = setTimeout(() => {
+    discordReconnectTimer = null;
+    loginDiscord();
+  }, delay);
+}
+
+function loginDiscord() {
+  if (shuttingDown || discordClient.isReady()) return;
+
+  discordLoginAttempts += 1;
+  console.log(`🔐 Tentando conectar ao Discord (tentativa ${discordLoginAttempts})...`);
+
+  discordLoginTimeout = setTimeout(() => {
+    discordLoginTimeout = null;
+    if (!discordClient.isReady()) {
+      console.error(
+        '⏱️ O Discord não chegou ao estado READY em 60 segundos; ' +
+        'o Gateway será reiniciado automaticamente.'
+      );
+      scheduleDiscordLogin('timeout aguardando READY');
+    }
+  }, 60000);
+
+  discordClient.login(normalizedDiscordToken())
+    .then(() => {
+      console.log('✅ Solicitação de login do Discord enviada.');
+    })
+    .catch(error => {
+      if (discordLoginTimeout) {
+        clearTimeout(discordLoginTimeout);
+        discordLoginTimeout = null;
+      }
+
+      const code = error?.code ? ` [${error.code}]` : '';
+      console.error(`❌ Falha no login do Discord${code}:`, error?.message || error);
+      console.error(
+        'Verifique se DISCORD_TOKEN contém apenas o token do bot, sem aspas ' +
+        'e sem o prefixo "Bot ".'
+      );
+      if (error?.code === 'TokenInvalid' || error?.status === 401) {
+        console.error('🛑 Retry automático desativado: corrija DISCORD_TOKEN no Render e faça um novo deploy.');
+        return;
+      }
+      scheduleDiscordLogin('falha no login');
+    });
+}
+
 // O login Microsoft do Minecraft não depende do Discord.
 // Assim, o link microsoft.com/link aparece mesmo se o Discord
 // estiver offline ou com problema de conexão.
 startBedrockOnce();
-
-discordLoginTimeout = setTimeout(() => {
-  if (!discordClient.isReady()) {
-    console.error(
-      '⏱️ O Discord não chegou ao estado READY em 60 segundos.'
-    );
-    console.error(
-      'O Minecraft continuará funcionando, mas é necessário investigar ' +
-      'a conexão do Gateway Discord.'
-    );
-  }
-}, 60000);
-
-console.log('🔐 Tentando conectar ao Discord...');
-
-discordClient.login(CONFIG.DISCORD_TOKEN)
-  .then(() => {
-    console.log('✅ Solicitação de login do Discord enviada.');
-  })
-  .catch(error => {
-    if (discordLoginTimeout) {
-      clearTimeout(discordLoginTimeout);
-      discordLoginTimeout = null;
-    }
-
-    console.error('❌ Falha no login do Discord:', error);
-    console.error(
-      'Verifique se DISCORD_TOKEN contém apenas o token do bot, sem aspas ' +
-      'e sem o prefixo "Bot ".'
-    );
-    // Não encerra o processo: o Minecraft pode continuar conectado.
-  });
+loginDiscord();
 
 process.on('uncaughtException', error => {
   console.error('❌ Erro fatal não tratado:');
