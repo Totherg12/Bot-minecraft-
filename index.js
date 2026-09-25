@@ -46,11 +46,21 @@ app.listen(PORT, '0.0.0.0', () => {
 });
 
 const discordClient = new Client({
-  intents: [GatewayIntentBits.Guilds]
+  intents: [GatewayIntentBits.Guilds],
+  ws: {
+    handshakeTimeout: 30000
+  },
+  rest: {
+    timeout: 30000
+  }
 });
 
 discordClient.on('debug', message => {
-  console.log(`🔎 Discord debug: ${message}`);
+  const safeMessage = String(message)
+    .replace(/(Provided token:)\s*.*/i, '$1 [oculto]')
+    .replace(/(token[\"']?\s*[:=]\s*).*/i, '$1[oculto]');
+
+  console.log(`🔎 Discord debug: ${safeMessage}`);
 });
 
 discordClient.on('warn', message => {
@@ -860,4 +870,3 @@ process.on('SIGTERM', () => {
 process.on('SIGINT', () => {
   shutdown('SIGINT recebido', 0);
 });
- 
