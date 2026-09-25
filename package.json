@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "Bot do Discord com Fake Client para Bedrock",
   "main": "index.js",
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
     "start": "node index.js"
   },
