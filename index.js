@@ -49,6 +49,40 @@ const discordClient = new Client({
   intents: [GatewayIntentBits.Guilds]
 });
 
+discordClient.on('debug', message => {
+  console.log(`🔎 Discord debug: ${message}`);
+});
+
+discordClient.on('warn', message => {
+  console.warn(`⚠️ Discord aviso: ${message}`);
+});
+
+discordClient.on('error', error => {
+  console.error('❌ Erro Discord:', error);
+});
+
+discordClient.on('shardError', (error, shardId) => {
+  console.error(`❌ Erro do Gateway Discord no shard ${shardId}:`, error);
+});
+
+discordClient.on('shardReconnecting', shardId => {
+  console.log(`🔄 Discord reconectando no shard ${shardId}...`);
+});
+
+discordClient.on('shardDisconnect', (event, shardId) => {
+  console.error(
+    `🔌 Discord desconectado no shard ${shardId}. ` +
+    `Código: ${event?.code || 'desconhecido'}`
+  );
+});
+
+discordClient.on('shardReady', (shardId, unavailableGuilds) => {
+  console.log(
+    `✅ Gateway Discord pronto no shard ${shardId}. ` +
+    `Guilds indisponíveis: ${unavailableGuilds?.size || 0}`
+  );
+});
+
 // ============================================================
 // ESTADO
 // ============================================================
@@ -59,6 +93,7 @@ let mcClient = null;
 let connecting = false;
 let reconnectTimer = null;
 let bedrockStarted = false;
+let discordLoginTimeout = null;
 let shuttingDown = false;
 let heartbeatInterval = null;
 let connectionWatchdog = null;
@@ -632,6 +667,11 @@ async function registerCommands() {
 }
 
 discordClient.once(Events.ClientReady, async client => {
+  if (discordLoginTimeout) {
+    clearTimeout(discordLoginTimeout);
+    discordLoginTimeout = null;
+  }
+
   console.log(`🤖 Discord conectado como ${client.user.tag}`);
 
   try {
@@ -711,7 +751,6 @@ discordClient.on(Events.InteractionCreate, async interaction => {
   }
 });
 
-discordClient.on(Events.Error, error => console.error('❌ Erro Discord:', error));
 
 // ============================================================
 // SINAL DE VIDA E ENCERRAMENTO SEGURO
@@ -770,12 +809,37 @@ startHeartbeat();
 // estiver offline ou com problema de conexão.
 startBedrockOnce();
 
+discordLoginTimeout = setTimeout(() => {
+  if (!discordClient.isReady()) {
+    console.error(
+      '⏱️ O Discord não chegou ao estado READY em 60 segundos.'
+    );
+    console.error(
+      'O Minecraft continuará funcionando, mas é necessário investigar ' +
+      'a conexão do Gateway Discord.'
+    );
+  }
+}, 60000);
+
 console.log('🔐 Tentando conectar ao Discord...');
 
-discordClient.login(CONFIG.DISCORD_TOKEN).catch(error => {
-  console.error('❌ Falha no login do Discord:', error);
-  // Não encerra o processo: o Minecraft pode continuar conectado.
-});
+discordClient.login(CONFIG.DISCORD_TOKEN)
+  .then(() => {
+    console.log('✅ Solicitação de login do Discord enviada.');
+  })
+  .catch(error => {
+    if (discordLoginTimeout) {
+      clearTimeout(discordLoginTimeout);
+      discordLoginTimeout = null;
+    }
+
+    console.error('❌ Falha no login do Discord:', error);
+    console.error(
+      'Verifique se DISCORD_TOKEN contém apenas o token do bot, sem aspas ' +
+      'e sem o prefixo "Bot ".'
+    );
+    // Não encerra o processo: o Minecraft pode continuar conectado.
+  });
 
 process.on('uncaughtException', error => {
   console.error('❌ Erro fatal não tratado:');
@@ -796,3 +860,4 @@ process.on('SIGTERM', () => {
 process.on('SIGINT', () => {
   shutdown('SIGINT recebido', 0);
 });
+ 
